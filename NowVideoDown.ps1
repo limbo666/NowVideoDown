@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.36)
+    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.37)
 .NOTES
     Requires:  yt-dlp.exe (+ ffmpeg.exe for merging/thumbnails)
                Place both next to this script.
@@ -69,6 +69,9 @@ function Get-ActiveList {
 
 $SettingsFile   = Join-Path $ScriptDir "settings.json"
 $OldSettingsFile = Join-Path $env:APPDATA "VideoDownloader\settings.json"
+
+# first run = no settings here AND no legacy settings to migrate
+$script:isFirstRun = -not ((Test-Path $SettingsFile) -or (Test-Path $OldSettingsFile))
 
 if (-not (Test-Path $SettingsFile) -and (Test-Path $OldSettingsFile)) {
     try { Copy-Item -Path $OldSettingsFile -Destination $SettingsFile -Force | Out-Null } catch {}
@@ -202,6 +205,7 @@ $script:jobExitCode = $null
 $script:runFolderOverride = $null; $script:isDirty = $false; $script:pasteDlTimer = $null
 $script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:aboutForm = $null; $script:managerForm = $null
 $script:clipLast = ""; $script:clipUrl = $null; $script:clipTimer = $null
+$script:updateJob = $null; $script:updTimer = $null; $script:ytdlpOutdated = $false; $script:ytdlpLocal = "?"
 # persistent session log (log.txt next to the script, capped + rotated)
 $script:logFile = Join-Path $ScriptDir "log.txt"
 $script:logSize = 0; $script:logMaxSize = 512 * 1024
@@ -240,7 +244,7 @@ function Get-ThemePalette($themeName) {
 
 # -- FORM SETUP ------------------------------------------------------------
 $form = New-Object System.Windows.Forms.Form
-$form.Text            = "Now Video Down - Pro Edition v2.36"
+$form.Text            = "Now Video Down - Pro Edition v2.37"
 $winW = if ($cfg.WinW -and $cfg.WinW -gt 500) { [int]$cfg.WinW } else { 900 }
 $winH = if ($cfg.WinH -and $cfg.WinH -gt 500) { [int]$cfg.WinH } else { 915 }
 $form.ClientSize      = [System.Drawing.Size]::new($winW, $winH)
@@ -345,7 +349,7 @@ $lblSub.Text = "YouTube | Facebook | Twitter/X | Instagram | TikTok | 1000+ site
 $lblSub.Font = $fSub; $lblSub.Location = [System.Drawing.Point]::new(20,65); $lblSub.AutoSize = $true
 
 $lblCredits = New-Object System.Windows.Forms.Label
-$lblCredits.Text = "v 2.36 Pro Edition - Nikos Georgousis"
+$lblCredits.Text = "v 2.37 Pro Edition - Nikos Georgousis"
 $lblCredits.Font = $fSub; $lblCredits.Location = [System.Drawing.Point]::new(620,40); $lblCredits.AutoSize = $true
 
 # Group 1: Source (GroupBox) - URL/batch row + clipboard detection row
@@ -412,6 +416,12 @@ $gbStatus.Location = [System.Drawing.Point]::new(20,475); $gbStatus.Size = [Syst
 $lblWarn = New-Object System.Windows.Forms.Label
 $lblWarn.Font = $fBold; $lblWarn.Location = [System.Drawing.Point]::new(15,22); $lblWarn.Size = [System.Drawing.Size]::new(600,18)
 
+# Update-available link (shown when a newer yt-dlp exists)
+$lnkUpdateYt = New-Object System.Windows.Forms.LinkLabel
+$lnkUpdateYt.Text = ""; $lnkUpdateYt.Location = [System.Drawing.Point]::new(620,22); $lnkUpdateYt.AutoSize = $true
+$lnkUpdateYt.Visible = $false; $lnkUpdateYt.LinkArea = New-Object System.Windows.Forms.LinkArea(0, 1000)
+$lnkUpdateYt.Add_LinkClicked({ $lnkUpdateYt.Visible = $false; try { $menuUpdateYt.PerformClick() } catch { } })
+
 # Progress Bar
 $progress = New-Object System.Windows.Forms.ProgressBar; $progress.Location = [System.Drawing.Point]::new(15,48); $progress.Size = [System.Drawing.Size]::new(700,15)
 
@@ -443,7 +453,7 @@ $lblFooter = New-Object System.Windows.Forms.Label; $lblFooter.Text = "Batch fil
 
 # Add all controls to the groupbox
 $gbStatus.Controls.AddRange(@(
-    $lblWarn, $progress, $lblStatus, $lblSpeed, $lblEta, $btnCancel,
+    $lblWarn, $lnkUpdateYt, $progress, $lblStatus, $lblSpeed, $lblEta, $btnCancel,
     $btnFolder, $btnPlayLast,
     $lblLogHdr, $chkVerbose, $txtLog, $lblFooter
 ))
@@ -531,6 +541,134 @@ function Update-AudioUIState {
     $cmbQuality.Enabled  = (-not $isAudio)
 }
 
+# -- yt-dlp UPDATE CHECK (non-blocking; runs at startup and after updates) ---
+function Check-YtDlpVersion {
+    try {
+        if (-not $script:ytdlp) { return }
+        $local = ""
+        try { $local = [string](& $script:ytdlp --version 2>&1 | Select-Object -First 1) } catch { }
+        $script:ytdlpLocal = $local
+        if ($script:updateJob) { try { Remove-Job $script:updateJob -Force -ErrorAction SilentlyContinue } catch { } }
+        $script:updateJob = Start-Job {
+            param($local)
+            $remote = $null
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                $r = Invoke-RestMethod -Uri "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest" -Headers @{ "User-Agent" = "NowVideoDown" } -TimeoutSec 20
+                $remote = [string]$r.tag_name
+            } catch { }
+            [PSCustomObject]@{ Local = $local; Remote = $remote }
+        } -ArgumentList $local
+        if ($script:updTimer) { try { $script:updTimer.Stop(); $script:updTimer.Dispose() } catch { } }
+        $script:updTimer = New-Object System.Windows.Forms.Timer
+        $script:updTimer.Interval = 1000
+        $script:updTimer.Add_Tick({
+            try {
+                if ($script:updateJob -and $script:updateJob.State -ne 'Running') {
+                    $script:updTimer.Stop(); $script:updTimer.Dispose(); $script:updTimer = $null
+                    $res = @(Receive-Job $script:updateJob -ErrorAction SilentlyContinue)
+                    Remove-Job $script:updateJob -Force -ErrorAction SilentlyContinue; $script:updateJob = $null
+                    if ($res -and $res[0].Remote) {
+                        $l = [string]$res[0].Local; $r = [string]$res[0].Remote
+                        if ($l -and $r -and $l -ne $r) {
+                            $script:ytdlpOutdated = $true
+                            $lnkUpdateYt.Text = "yt-dlp $l -> $r - update now"
+                            $lnkUpdateYt.Visible = $true
+                            Log ("yt-dlp update available: {0} -> {1}" -f $l, $r) "Yellow"
+                        }
+                    }
+                }
+            } catch {
+                try { Write-SessionLog ("UPDATE CHECK ERROR: " + $_.Exception.Message) } catch { }
+            }
+        })
+        $script:updTimer.Start()
+    } catch { }
+}
+
+# -- FIRST-RUN WIZARD (only when settings.json does not exist yet) ----------
+function Show-FirstRunWizard {
+    try {
+        Log "Wizard: opening" "Cyan"
+        $t = Get-ThemePalette $cfg.Theme
+        $frm = New-Object System.Windows.Forms.Form
+        $frm.Text = "Welcome to NowVideoDown"
+        $frm.Size = [System.Drawing.Size]::new(560, 420)
+        $frm.StartPosition = 'CenterParent'; $frm.FormBorderStyle = 'FixedDialog'
+        $frm.MaximizeBox = $false; $frm.MinimizeBox = $false
+        $frm.BackColor = $t.Bg; $frm.ForeColor = $t.Text
+        if (Test-Path $IconPath) { try { $frm.Icon = New-Object System.Drawing.Icon($IconPath) } catch { } }
+
+        $lblHello = New-Object System.Windows.Forms.Label
+        $lblHello.Text = "Welcome! Two quick choices and you are ready to download."
+        $lblHello.Location = [System.Drawing.Point]::new(20, 16); $lblHello.AutoSize = $true; $lblHello.ForeColor = $t.Sub
+
+        $gb1 = New-Object System.Windows.Forms.GroupBox
+        $gb1.Text = "1. DOWNLOAD ENGINE"; $gb1.Font = $fBold; $gb1.ForeColor = $t.Accent
+        $gb1.Location = [System.Drawing.Point]::new(20, 46); $gb1.Size = [System.Drawing.Size]::new(520, 82)
+        $lblYt = New-Object System.Windows.Forms.Label; $lblYt.Text = "yt-dlp:"; $lblYt.Location = [System.Drawing.Point]::new(15, 28); $lblYt.AutoSize = $true; $lblYt.ForeColor = $t.Text
+        $lblYtState = New-Object System.Windows.Forms.Label; $lblYtState.Location = [System.Drawing.Point]::new(75, 28); $lblYtState.AutoSize = $true; $lblYtState.Font = $fBold
+        $lblFfmpeg = New-Object System.Windows.Forms.Label; $lblFfmpeg.Text = "ffmpeg:"; $lblFfmpeg.Location = [System.Drawing.Point]::new(15, 54); $lblFfmpeg.AutoSize = $true; $lblFfmpeg.ForeColor = $t.Text
+        $lblFfmpegState = New-Object System.Windows.Forms.Label; $lblFfmpegState.Location = [System.Drawing.Point]::new(75, 54); $lblFfmpegState.AutoSize = $true; $lblFfmpegState.Font = $fBold
+        if ($script:ytdlp) { $lblYtState.Text = "Ready (v$script:ytdlpLocal)"; $lblYtState.ForeColor = $t.Success }
+        else { $lblYtState.Text = "Missing - get it from Tools later"; $lblYtState.ForeColor = $t.Warn }
+        if ($script:ffmpeg) { $lblFfmpegState.Text = "Ready"; $lblFfmpegState.ForeColor = $t.Success }
+        else { $lblFfmpegState.Text = "Missing - get it from Tools later"; $lblFfmpegState.ForeColor = $t.Warn }
+        $gb1.Controls.AddRange(@($lblYt, $lblYtState, $lblFfmpeg, $lblFfmpegState))
+
+        $gb2 = New-Object System.Windows.Forms.GroupBox
+        $gb2.Text = "2. APPEARANCE"; $gb2.Font = $fBold; $gb2.ForeColor = $t.Accent
+        $gb2.Location = [System.Drawing.Point]::new(20, 138); $gb2.Size = [System.Drawing.Size]::new(520, 72)
+        $cmbThemeW = New-Object System.Windows.Forms.ComboBox; $cmbThemeW.Location = [System.Drawing.Point]::new(15, 32); $cmbThemeW.Size = [System.Drawing.Size]::new(240, 26); $cmbThemeW.DropDownStyle = 'DropDownList'; $cmbThemeW.FlatStyle = 'Flat'; $cmbThemeW.BackColor = $t.Entry; $cmbThemeW.ForeColor = $t.Text
+        $ThemesList | ForEach-Object { [void]$cmbThemeW.Items.Add($_) }
+        $ti = $cmbThemeW.Items.IndexOf($cfg.Theme); if ($ti -ge 0) { $cmbThemeW.SelectedIndex = $ti } else { $cmbThemeW.SelectedIndex = 0 }
+        $gb2.Controls.AddRange(@($cmbThemeW))
+
+        $gb3 = New-Object System.Windows.Forms.GroupBox
+        $gb3.Text = "3. DOWNLOADS FOLDER"; $gb3.Font = $fBold; $gb3.ForeColor = $t.Accent
+        $gb3.Location = [System.Drawing.Point]::new(20, 220); $gb3.Size = [System.Drawing.Size]::new(520, 78)
+        $txtFolderW = New-Object System.Windows.Forms.TextBox; $txtFolderW.Location = [System.Drawing.Point]::new(15, 34); $txtFolderW.Size = [System.Drawing.Size]::new(400, 26); $txtFolderW.Text = $DownloadFolder; $txtFolderW.BackColor = $t.Entry; $txtFolderW.ForeColor = $t.Text
+        $btnBrowseW = New-ProButton "Browse..." 425 31 75 28
+        $btnBrowseW.Add_Click({
+            $fbd = New-Object System.Windows.Forms.FolderBrowserDialog
+            $fbd.Description = "Choose the default downloads folder"
+            try { $fbd.SelectedPath = $txtFolderW.Text } catch { }
+            if ($fbd.ShowDialog() -eq 'OK') { $txtFolderW.Text = $fbd.SelectedPath }
+        })
+        $gb3.Controls.AddRange(@($txtFolderW, $btnBrowseW))
+
+        $btnOkW = New-Object System.Windows.Forms.Button
+        $btnOkW.Text = "Start using NowVideoDown"; $btnOkW.Location = [System.Drawing.Point]::new(140, 318); $btnOkW.Size = [System.Drawing.Size]::new(210, 34)
+        $btnOkW.FlatStyle = 'Flat'; $btnOkW.FlatAppearance.BorderSize = 0
+        Style-Button $btnOkW $t.Success (HexToCol "#ffffff") $t.IsDark
+        $btnSkipW = New-Object System.Windows.Forms.Button
+        $btnSkipW.Text = "Skip"; $btnSkipW.Location = [System.Drawing.Point]::new(360, 318); $btnSkipW.Size = [System.Drawing.Size]::new(80, 34)
+        $btnSkipW.FlatStyle = 'Flat'; $btnSkipW.FlatAppearance.BorderSize = 0
+        Style-Button $btnSkipW $t.BtnGray $t.Text $t.IsDark
+        $btnSkipW.DialogResult = 'Cancel'
+        $frm.AcceptButton = $btnOkW; $frm.CancelButton = $btnSkipW
+        $btnOkW.Add_Click({
+            try {
+                if ($cmbThemeW.Text) { $cfg.Theme = $cmbThemeW.Text; Apply-Theme $cfg.Theme }
+                $folder = $txtFolderW.Text.Trim()
+                if (-not $folder) { $folder = $DownloadFolder }
+                if ($folder -ne $DownloadFolder) {
+                    $dp = $cfg.Profiles | Where-Object { $_.Name -eq "Default Video" }
+                    if ($dp) { $dp.Folder = $folder }
+                }
+                $script:isUpdatingUI = $true; $cmbFolder.Text = $folder; $script:isUpdatingUI = $false
+                Save-Settings $form $cfg
+                Log "First-run setup complete." "Lime"
+            } catch { }
+            $frm.Close()
+        })
+        $frm.Controls.AddRange(@($lblHello, $gb1, $gb2, $gb3, $btnOkW, $btnSkipW))
+        [void]$frm.ShowDialog()
+    } catch {
+        try { Write-SessionLog ("WIZARD ERROR: " + $_.Exception.Message); $_ | Out-File (Join-Path $ScriptDir "error.log") -Encoding UTF8 -Force } catch { }
+    }
+}
+
 function Apply-Theme($themeName) {
     $t = Get-ThemePalette $themeName
     $form.BackColor = $t.Bg; $form.ForeColor = $t.Text
@@ -545,6 +683,8 @@ function Apply-Theme($themeName) {
     $lblWarn.ForeColor = $t.Warn
     $lblDirty.ForeColor = $t.Warn
     $lblClipUrl.ForeColor = $t.Accent
+    $lnkUpdateYt.LinkColor = $t.Accent; $lnkUpdateYt.ActiveLinkColor = $t.Accent; $lnkUpdateYt.VisitedLinkColor = $t.Accent
+    $lnkUpdateYt.ForeColor = $t.Accent
     $lblVideoHdr.ForeColor = $t.Accent; $lblAudioHdr.ForeColor = $t.Accent
     $sepCol.BackColor = $t.BtnGray
     
@@ -703,6 +843,7 @@ $tooltip.SetToolTip($lblSpeed,    "Current download speed")
 $tooltip.SetToolTip($lblEta,      "Estimated time remaining")
 $tooltip.SetToolTip($txtLog,      "Full yt-dlp output - scrollable")
 $tooltip.SetToolTip($lblProfileSummary, "What the active profile will produce and where it saves")
+$tooltip.SetToolTip($lnkUpdateYt, "A newer yt-dlp is available - click to update it now")
 $tooltip.SetToolTip($cmbAudioQuality,  "Audio bitrate (Best = original quality)")
 $tooltip.SetToolTip($lblClipHint,      "Copy a video URL anywhere and it will appear here - toggle under Tools or the tray menu")
 $tooltip.SetToolTip($lblClipUrl,       "Click to copy the detected URL into the URL box")
@@ -711,6 +852,7 @@ $tooltip.SetToolTip($btnClipIgnore,    "Ignore this URL")
 
 Update-UIState -ResetStatus
 Apply-Theme $cfg.Theme
+Check-YtDlpVersion
 
 # -- ABOUT MENU WIRING -----------------------------------------------------
 function Get-ImageSafe($path) {
@@ -755,7 +897,7 @@ function Show-AboutDialog {
         $lblTitleAbt.AutoSize = $true; $lblTitleAbt.ForeColor = $t.Accent
 
         $lblVer = New-Object System.Windows.Forms.Label
-        $lblVer.Text = "Pro Edition v2.36"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
+        $lblVer.Text = "Pro Edition v2.37"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
         $lblVer.AutoSize = $true; $lblVer.ForeColor = $t.Text
 
         $lblDesc = New-Object System.Windows.Forms.Label
@@ -1719,6 +1861,8 @@ $menuUpdateYt.Add_Click({
         
         Update-UIState -ResetStatus
         Log "yt-dlp update check completed." "Lime"
+        $lnkUpdateYt.Visible = $false
+        Check-YtDlpVersion
     } else {
         SetStatus "Downloading yt-dlp.exe..."; Log "Fetching latest release from GitHub..." "Yellow"
         $btnDownload.Enabled = $false; $btnList.Enabled = $false
@@ -1730,7 +1874,7 @@ $menuUpdateYt.Add_Click({
                     $script:dlTimer.Stop(); $script:dlTimer.Dispose(); Receive-Job $script:dlJob | Out-Null; Remove-Job $script:dlJob -Force
                     
                     Update-UIState -ResetStatus
-                    if ($script:ytdlp) { Log "yt-dlp downloaded successfully!" "Lime" } else { Log "yt-dlp download failed." "Red" }
+                    if ($script:ytdlp) { Log "yt-dlp downloaded successfully!" "Lime"; $lnkUpdateYt.Visible = $false; Check-YtDlpVersion } else { Log "yt-dlp download failed." "Red" }
                 }
             } catch {
                 try { Write-SessionLog ("DL TICK ERROR: " + $_.Exception.Message); $_ | Out-File (Join-Path $ScriptDir "error.log") -Encoding UTF8 -Force } catch { }
@@ -1811,6 +1955,8 @@ $form.Add_FormClosing({
     if ($script:activeTimer) { try{$script:activeTimer.Stop();$script:activeTimer.Dispose()}catch{} }
     if ($script:delayTimer)  { try{$script:delayTimer.Stop(); $script:delayTimer.Dispose() }catch{} }
     if ($script:pasteDlTimer) { try{$script:pasteDlTimer.Stop(); $script:pasteDlTimer.Dispose() }catch{} }
+    if ($script:updTimer)     { try{$script:updTimer.Stop(); $script:updTimer.Dispose() }catch{} }
+    if ($script:updateJob)    { try{Remove-Job $script:updateJob -Force -ErrorAction SilentlyContinue}catch{} }
     if ($script:activeJob)   { Stop-Job $script:activeJob -ErrorAction SilentlyContinue; Remove-Job $script:activeJob -Force -ErrorAction SilentlyContinue }
     Get-Process -Name "yt-dlp", "ffmpeg" -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $script:knownPIDs } | Stop-Process -Force -ErrorAction SilentlyContinue
 })
@@ -1986,7 +2132,7 @@ $form.Add_Resize({
     }
 })
 
-Write-SessionLog "--- Now Video Down v2.36 started ---"
+Write-SessionLog "--- Now Video Down v2.37 started ---"
 
 # -- SELF-TEST HOOK (only when NVD_SELFTEST=1) -----------------------------
 # Reproduces the minimize→tray→restore cycle in-process and writes the
@@ -2146,6 +2292,21 @@ $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 if ($form.Width  -gt ($workArea.Width  - 16)) { $form.Width  = $workArea.Width  - 16 }
 if ($form.Height -gt ($workArea.Height - 16)) { $form.Height = $workArea.Height - 16 }
 Layout-Adaptive
+
+# first-run wizard: one-shot timer, opens right after the main window is up
+if ($script:isFirstRun) {
+    $wizTimer = New-Object System.Windows.Forms.Timer
+    $wizTimer.Interval = 1500
+    $wizTimer.Add_Tick({
+        $wizTimer.Stop(); $wizTimer.Dispose()
+        try {
+            if ($script:isFirstRun -and $env:NVD_SELFTEST -ne "1") { Show-FirstRunWizard }
+        } catch {
+            try { Write-SessionLog ("WIZARD TIMER ERROR: " + $_.Exception.Message) } catch { }
+        }
+    })
+    $wizTimer.Start()
+}
 
 try {
     # Application.Run instead of ShowDialog: hiding the form to the tray must

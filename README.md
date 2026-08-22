@@ -6,7 +6,7 @@ Paste a link, choose where to save it, click Download. That's the whole idea.
 It wraps [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [ffmpeg](https://ffmpeg.org/) in a proper window,
 so you never have to touch the command line.
 
-**Current version: 2.36**
+**Current version: 2.37**
 
 ## Why you'll like it
 
@@ -26,6 +26,8 @@ so you never have to touch the command line.
 ![Manage profiles](Screenshots/02-profiles.png)
 
 ![About](Screenshots/03-about.png)
+
+![First-run welcome](Screenshots/04-wizard.png)
 
 ## Getting started
 
@@ -48,6 +50,8 @@ thumbnails, or high-quality merging). The window still opens without them, it ju
   `Ctrl+R` run the list, `Ctrl+N` new profile, `Ctrl+E` edit the profile.
 - **Minimize** sends the app to the tray next to the clock. Double-click the tray icon to bring it back.
   Downloads keep running in the background.
+- **Keeps itself current:** on startup the app quietly checks whether a newer yt-dlp exists and offers a
+  one-click update if so. First launch shows a short welcome window to pick a theme and downloads folder.
 - **Quick mode** (the checkbox in the profile section): change settings for one download only,
   without touching your saved profiles.
 

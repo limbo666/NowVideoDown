@@ -203,7 +203,7 @@ $script:onDoneCallback = $null; $script:batchLinks = @(); $script:batchTotal = 0
 $script:lastDownloadedFile = $null; $script:isUpdatingUI = $false
 $script:jobExitCode = $null
 $script:runFolderOverride = $null; $script:isDirty = $false; $script:pasteDlTimer = $null
-$script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:aboutForm = $null; $script:managerForm = $null; $script:editorForm = $null; $script:editorNameBox = $null; $script:editorOkBtn = $null
+$script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:aboutForm = $null; $script:managerForm = $null; $script:editorForm = $null; $script:editorNameBox = $null; $script:editorOkBtn = $null; $script:wizardForm = $null
 $script:clipLast = ""; $script:clipUrl = $null; $script:clipTimer = $null
 $script:updateJob = $null; $script:updTimer = $null; $script:ytdlpOutdated = $false; $script:ytdlpLocal = "?"
 # persistent session log (log.txt next to the script, capped + rotated)
@@ -598,6 +598,8 @@ function Show-FirstRunWizard {
         $frm.MaximizeBox = $false; $frm.MinimizeBox = $false
         $frm.BackColor = $t.Bg; $frm.ForeColor = $t.Text
         if (Test-Path $IconPath) { try { $frm.Icon = New-Object System.Drawing.Icon($IconPath) } catch { } }
+        $script:wizardForm = $frm
+        $frm.Add_FormClosed({ try { $script:wizardForm = $null } catch { } })
 
         $lblHello = New-Object System.Windows.Forms.Label
         $lblHello.Text = "Welcome! Two quick choices and you are ready to download."
@@ -2199,14 +2201,21 @@ if ($env:NVD_SELFTEST -eq "1") {
                     StLog "shot saved: $(Split-Path $path -Leaf)"
                 } catch { StLog "shot error: $($_.Exception.Message)" }
             }
-            try { $txtUrl.Text = "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } catch { }
-            Save-WindowShot $form (Join-Path $script:shotDir "01-main.png")
+            # --- screenshots: only when NVD_SHOTS=1 (explicit request) so routine
+            # selftest runs never overwrite the repo Screenshots/ folder ---
+            $script:doShots = ($env:NVD_SHOTS -eq "1")
+            if ($script:doShots) {
+                try { $txtUrl.Text = "" } catch { }
+                Save-WindowShot $form (Join-Path $script:shotDir "01-main.png")
+            }
             $shotT = New-Object System.Windows.Forms.Timer
             $shotT.Interval = 1200
             $shotT.Add_Tick({
                 $shotT.Stop(); $shotT.Dispose()
                 try {
-                    Save-WindowShot $script:managerForm (Join-Path $script:shotDir "02-profiles.png")
+                    if ($script:doShots) {
+                        Save-WindowShot $script:managerForm (Join-Path $script:shotDir "02-profiles.png")
+                    }
                     # real delete through the UI (confirm auto-accepted in selftest)
                     if ($script:managerLv -and $script:managerLv.Items.Count -gt 1) {
                         $script:managerLv.Items[0].Selected = $true
@@ -2223,12 +2232,29 @@ if ($env:NVD_SELFTEST -eq "1") {
             $shotT2.Add_Tick({
                 $shotT2.Stop(); $shotT2.Dispose()
                 try {
-                    Save-WindowShot $script:aboutForm (Join-Path $script:shotDir "03-about.png")
+                    if ($script:doShots) {
+                        Save-WindowShot $script:aboutForm (Join-Path $script:shotDir "03-about.png")
+                    }
                     if ($script:aboutForm) { $script:aboutForm.Close() }
                 } catch { }
             })
             $shotT2.Start()
             Show-AboutDialog
+            if ($script:doShots) {
+                # first-run wizard shot (04-wizard.png) - never captured by the
+                # normal selftest flow; only when explicitly requested
+                $shotW = New-Object System.Windows.Forms.Timer
+                $shotW.Interval = 1200
+                $shotW.Add_Tick({
+                    $shotW.Stop(); $shotW.Dispose()
+                    try {
+                        Save-WindowShot $script:wizardForm (Join-Path $script:shotDir "04-wizard.png")
+                        if ($script:wizardForm) { $script:wizardForm.Close() }
+                    } catch { StLog "wizard shot error: $($_.Exception.Message)" }
+                })
+                $shotW.Start()
+                Show-FirstRunWizard
+            }
             StLog "shots: captured"
             # editor regression: New Profile must open and close without crashing
             $edT = New-Object System.Windows.Forms.Timer

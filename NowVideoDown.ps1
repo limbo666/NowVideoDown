@@ -82,7 +82,7 @@ if (-not (Test-Path $DownloadFolder)) { New-Item -ItemType Directory $DownloadFo
 # Two instances fight over settings.json and both try to own a tray icon.
 $script:isFirstInstance = $false
 $script:appMutex = New-Object System.Threading.Mutex($true, "NowVideoDown-SingleInstance", [ref]$script:isFirstInstance)
-if (-not $script:isFirstInstance -and $env:NVD_SELFTEST -ne "1") {
+if (-not $script:isFirstInstance -and $env:NVD_SELFTEST -ne "1" -and $env:NVD_DEMO -ne "1") {
     [System.Windows.Forms.MessageBox]::Show(
         "Now Video Down is already running.`n`nIf you minimized it to the tray, look for its icon next to the clock - or inside the hidden icons area (the ^ arrow) - and double-click it to restore the window.",
         "Now Video Down - Already Running",
@@ -2313,6 +2313,95 @@ $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 if ($form.Width  -gt ($workArea.Width  - 16)) { $form.Width  = $workArea.Width  - 16 }
 if ($form.Height -gt ($workArea.Height - 16)) { $form.Height = $workArea.Height - 16 }
 Layout-Adaptive
+
+# -- DEMO MODE (NVD_DEMO=1) - scripted tour for the demo video --------------
+# placed here so every function it calls (Layout-Adaptive, Show-ProfileManager,
+# Show-AboutDialog, Hide-ToTray, ...) is already defined. The tour itself runs
+# from a timer AFTER Application.Run starts, so the window is visible.
+if ($env:NVD_DEMO -eq "1") {
+    $script:demoT0 = Get-Date
+    $script:demoLog = Join-Path $ScriptDir "demo-timeline.txt"
+    Set-Content $script:demoLog -Value "0 demo-start" -Encoding UTF8
+    try { Add-Content $script:demoLog -Value ("t0-epoch " + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) -Encoding UTF8 } catch { }
+    function Demo-Mark($label) {
+        try {
+            $secs = [int]((Get-Date) - $script:demoT0).TotalSeconds
+            Add-Content $script:demoLog -Value "$secs $label" -Encoding UTF8
+        } catch { }
+    }
+    function Demo-Wait($secs) {
+        $n = [int]($secs * 10)
+        for ($i = 0; $i -lt $n; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+    }
+    # position & size the window on the primary monitor for the camera (before Run)
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $form.WindowState = 'Normal'
+    $form.Location = [System.Drawing.Point]::new($wa.X + 24, $wa.Y + 24)
+    $form.ClientSize = [System.Drawing.Size]::new($wa.Width - 48, $wa.Height - 110)
+    Layout-Adaptive
+    # demo options: no auto-tray, popup notifications on
+    $cfg.TrayMinimize = $false; $cfg.NotifyStyle = 2
+    $demoUrl = "https://www.pexels.com/download/video/36883675/"
+    $script:demoDir = Join-Path $env:TEMP ("nvd-demo-" + (Get-Random -Maximum 999999))
+    try { New-Item -ItemType Directory -Path $script:demoDir -Force | Out-Null } catch { }
+    $dp = Get-ActiveProfile
+    if ($dp) { $dp.RateLimit = "5M"; $dp.Folder = $script:demoDir; $dp.AudioOnly = $false; $dp.Format = "mp4"; $dp.Quality = "Best"; $dp.Subs = $false; $dp.Thumb = $false; $dp.Playlist = $false }
+    $script:isUpdatingUI = $true; $cmbFolder.Text = $script:demoDir; $script:isUpdatingUI = $false
+    $txtUrl.Text = ""; $txtLog.Text = ""; SetStatus "Ready - copy a video link anywhere, or paste one here"
+
+    $demoTimer = New-Object System.Windows.Forms.Timer
+    $demoTimer.Interval = 2000
+    $demoTimer.Add_Tick({
+        $demoTimer.Stop(); $demoTimer.Dispose()
+        try {
+            Demo-Wait 3                    # idle view
+            Demo-Mark "idle"
+            $txtUrl.Text = $demoUrl        # show a link being pasted
+            Demo-Mark "url-typed"
+            Demo-Wait 3
+            [System.Windows.Forms.Clipboard]::SetText($demoUrl)
+            Demo-Wait 3                    # clipboard chip appears
+            Demo-Mark "clipboard-chip"
+            # re-assert the demo target (a stray sync could revert the folder) and
+            # make sure no stale copy exists, so the download always runs for real
+            $script:isUpdatingUI = $true; $cmbFolder.Text = $script:demoDir; $script:isUpdatingUI = $false
+            try { Get-ChildItem $script:demoDir -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue } catch { }
+            Demo-Mark ("target=" + (Get-ActiveFolder))
+            Start-SingleDownload           # rate-limited via the demo profile
+            Demo-Mark "download-start"
+            $guard = 0
+            while ($script:activeJob -and $guard -lt 700) { Demo-Wait 0.5; $guard++ }
+            Demo-Wait 6                    # completion popup visible + closes
+            Demo-Mark "download-done"
+            $mT = New-Object System.Windows.Forms.Timer
+            $mT.Interval = 4000
+            $mT.Add_Tick({ $mT.Stop(); $mT.Dispose(); try { if ($script:managerForm) { $script:managerForm.Close() } } catch { } })
+            $mT.Start()
+            Show-ProfileManager
+            Demo-Mark "manager-shown"
+            Demo-Wait 1
+            $aT = New-Object System.Windows.Forms.Timer
+            $aT.Interval = 3000
+            $aT.Add_Tick({ $aT.Stop(); $aT.Dispose(); try { if ($script:aboutForm) { $script:aboutForm.Close() } } catch { } })
+            $aT.Start()
+            Show-AboutDialog
+            Demo-Mark "about-shown"
+            Demo-Wait 1
+            Hide-ToTray
+            Demo-Wait 3
+            Demo-Mark "tray-hidden"
+            Show-MainWindow
+            Demo-Wait 2
+            Demo-Mark "restored"
+            Demo-Wait 1
+            $form.Close()
+        } catch {
+            try { Add-Content $script:demoLog -Value "ERROR: $($_.Exception.Message)" -Encoding UTF8; $_ | Out-File (Join-Path $ScriptDir "error.log") -Encoding UTF8 -Force } catch { }
+            try { $form.Close() } catch { }
+        }
+    })
+    $demoTimer.Start()
+}
 
 # first-run wizard: one-shot timer, opens right after the main window is up
 if ($script:isFirstRun) {

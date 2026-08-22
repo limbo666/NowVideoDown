@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.37)
+    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.38)
 .NOTES
     Requires:  yt-dlp.exe (+ ffmpeg.exe for merging/thumbnails)
                Place both next to this script.
@@ -203,7 +203,7 @@ $script:onDoneCallback = $null; $script:batchLinks = @(); $script:batchTotal = 0
 $script:lastDownloadedFile = $null; $script:isUpdatingUI = $false
 $script:jobExitCode = $null
 $script:runFolderOverride = $null; $script:isDirty = $false; $script:pasteDlTimer = $null
-$script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:aboutForm = $null; $script:managerForm = $null
+$script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:aboutForm = $null; $script:managerForm = $null; $script:editorForm = $null
 $script:clipLast = ""; $script:clipUrl = $null; $script:clipTimer = $null
 $script:updateJob = $null; $script:updTimer = $null; $script:ytdlpOutdated = $false; $script:ytdlpLocal = "?"
 # persistent session log (log.txt next to the script, capped + rotated)
@@ -244,7 +244,7 @@ function Get-ThemePalette($themeName) {
 
 # -- FORM SETUP ------------------------------------------------------------
 $form = New-Object System.Windows.Forms.Form
-$form.Text            = "Now Video Down - Pro Edition v2.37"
+$form.Text            = "Now Video Down - Pro Edition v2.38"
 $winW = if ($cfg.WinW -and $cfg.WinW -gt 500) { [int]$cfg.WinW } else { 900 }
 $winH = if ($cfg.WinH -and $cfg.WinH -gt 500) { [int]$cfg.WinH } else { 915 }
 $form.ClientSize      = [System.Drawing.Size]::new($winW, $winH)
@@ -349,7 +349,7 @@ $lblSub.Text = "YouTube | Facebook | Twitter/X | Instagram | TikTok | 1000+ site
 $lblSub.Font = $fSub; $lblSub.Location = [System.Drawing.Point]::new(20,65); $lblSub.AutoSize = $true
 
 $lblCredits = New-Object System.Windows.Forms.Label
-$lblCredits.Text = "v 2.37 Pro Edition - Nikos Georgousis"
+$lblCredits.Text = "v 2.38 Pro Edition - Nikos Georgousis"
 $lblCredits.Font = $fSub; $lblCredits.Location = [System.Drawing.Point]::new(620,40); $lblCredits.AutoSize = $true
 
 # Group 1: Source (GroupBox) - URL/batch row + clipboard detection row
@@ -897,7 +897,7 @@ function Show-AboutDialog {
         $lblTitleAbt.AutoSize = $true; $lblTitleAbt.ForeColor = $t.Accent
 
         $lblVer = New-Object System.Windows.Forms.Label
-        $lblVer.Text = "Pro Edition v2.37"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
+        $lblVer.Text = "Pro Edition v2.38"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
         $lblVer.AutoSize = $true; $lblVer.ForeColor = $t.Text
 
         $lblDesc = New-Object System.Windows.Forms.Label
@@ -1295,6 +1295,7 @@ function Resolve-AskDestination {
 }
 
 function Show-ProfileEditor([string]$editName) {
+    try {
     $t = Get-ThemePalette $cfg.Theme
     $isEdit = -not [string]::IsNullOrEmpty($editName)
     $src = if ($isEdit) { $cfg.Profiles | Where-Object { $_.Name -eq $editName } } else { $null }
@@ -1377,6 +1378,17 @@ function Show-ProfileEditor([string]$editName) {
     $gb2.Controls.AddRange(@($lblFolder,$txtFolder,$btnBrowseE,$lblSub,$cmbSub,$lblSubHint,$chkAsk))
     $gb3.Controls.AddRange(@($lblFmt,$cmbFormatE,$lblQual,$cmbQualityE,$chkAudioE,$cmbAudioFmtE,$chkSubsE,$lblLang,$cmbLang,$chkThumbE,$chkPlaylistE,$cmbAudioQualityE,$lblItems,$txtItems,$lblRate,$txtRate,$lblCookies,$txtCookies,$lblTpl,$txtTpl,$lblTplHint,$chkVerboseE))
     $frm.Controls.AddRange(@($gb1, $gb2, $gb3, $btnOK, $btnCancelE))
+    $script:editorForm = $frm
+    $frm.Add_FormClosed({ try { $script:editorForm = $null } catch { } })
+
+    # -- editor helper (defined BEFORE prefill calls it - PowerShell has no hoisting)
+    function Update-EditorAudioState {
+        $isAudio = $chkAudioE.Checked
+        $cmbAudioFmtE.Enabled = $isAudio
+        $cmbAudioQualityE.Enabled = $isAudio
+        $cmbFormatE.Enabled   = (-not $isAudio)
+        $cmbQualityE.Enabled  = (-not $isAudio)
+    }
 
     # -- prefill
     $ed = @{ Name=""; Description=""; Format="mp4"; Quality="Best"; AudioOnly=$false; AudioFormat="mp3"; AudioQuality="Best"; Subs=$false; SubLang="en"; Thumb=$false; Playlist=$false; PlaylistRange=""; Verbose=$true; Folder=$DownloadFolder; Subfolder=""; AskDestination=$false; FilenameTemplate=""; RateLimit=""; CookiesFile="" }
@@ -1416,13 +1428,6 @@ function Show-ProfileEditor([string]$editName) {
     $tooltip.SetToolTip($cmbLang, "Subtitle language code(s), e.g. en, el or en,el")
     $tooltip.SetToolTip($cmbAudioFmtE, "Audio format for audio-only downloads")
     $tooltip.SetToolTip($chkVerboseE, "Show the full yt-dlp output in the log")
-    function Update-EditorAudioState {
-        $isAudio = $chkAudioE.Checked
-        $cmbAudioFmtE.Enabled = $isAudio
-        $cmbAudioQualityE.Enabled = $isAudio
-        $cmbFormatE.Enabled   = (-not $isAudio)
-        $cmbQualityE.Enabled  = (-not $isAudio)
-    }
     $chkAudioE.Add_CheckedChanged({ Update-EditorAudioState })
     $btnBrowseE.Add_Click({
         $fbd = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -1454,6 +1459,15 @@ function Show-ProfileEditor([string]$editName) {
     })
     [void]$frm.ShowDialog()
     return $script:editorResult
+    } catch {
+        try { Write-SessionLog ("EDITOR ERROR: " + $_.Exception.Message); $_ | Out-File (Join-Path $ScriptDir "error.log") -Encoding UTF8 -Force } catch { }
+        [System.Windows.Forms.MessageBox]::Show(
+            "The profile editor hit an unexpected error:`n$($_.Exception.Message)`n`nDetails saved to error.log next to the script.",
+            "Now Video Down - Editor Error",
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        return $null
+    }
 }
 
 function Show-ProfileManager {
@@ -2132,7 +2146,7 @@ $form.Add_Resize({
     }
 })
 
-Write-SessionLog "--- Now Video Down v2.37 started ---"
+Write-SessionLog "--- Now Video Down v2.38 started ---"
 
 # -- SELF-TEST HOOK (only when NVD_SELFTEST=1) -----------------------------
 # Reproduces the minimize→tray→restore cycle in-process and writes the
@@ -2191,6 +2205,13 @@ if ($env:NVD_SELFTEST -eq "1") {
             $shotT2.Start()
             Show-AboutDialog
             StLog "shots: captured"
+            # editor regression: New Profile must open and close without crashing
+            $edT = New-Object System.Windows.Forms.Timer
+            $edT.Interval = 1000
+            $edT.Add_Tick({ $edT.Stop(); $edT.Dispose(); try { if ($script:editorForm) { $script:editorForm.Close() } } catch { } })
+            $edT.Start()
+            Show-ProfileEditor $null
+            StLog "afterEditor: ok"
             $form.WindowState = 'Minimized'
             for ($i = 0; $i -lt 20; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
             StLog "afterMinimize: inTray=$script:inTray formVisible=$($form.Visible) trayVisible=$($script:tray.Visible) state=$($form.WindowState)"

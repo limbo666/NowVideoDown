@@ -114,7 +114,7 @@ function New-ProfileObj($name) {
         AudioFormat="mp3"; AudioQuality="Best"; Subs=$false; SubLang="en"; Thumb=$false; Playlist=$false; PlaylistRange=""
         Verbose=$true; Folder=$DownloadFolder; Subfolder=""; AskDestination=$false
         FilenameTemplate=""; RateLimit=""; CookiesFile=""
-        Created=(Get-Date -Format "yyyy-MM-dd"); LastUsed=$null
+        Created=(Get-Date -Format "yyyy-MM-dd"); LastUsed=$null; DeletedAt=$null
     }
 }
 function Normalize-Profile($p) {
@@ -1486,6 +1486,7 @@ function Show-ProfileManager {
     $lblHint.Location = [System.Drawing.Point]::new(15, 8); $lblHint.AutoSize = $true; $lblHint.Font = $fSub; $lblHint.ForeColor = $t.Sub
 
     $lv = New-Object System.Windows.Forms.ListView
+    $script:managerLv = $lv
     $lv.Location = [System.Drawing.Point]::new(15,28); $lv.Size = [System.Drawing.Size]::new(735,320)
     $lv.View = 'Details'; $lv.FullRowSelect = $true; $lv.GridLines = $false; $lv.BorderStyle = 'FixedSingle'
     $lv.BackColor = $t.Entry; $lv.ForeColor = $t.Text
@@ -1503,6 +1504,7 @@ function Show-ProfileManager {
     $btnRename = New-ProButton "Rename"      205 360 85 30
     $btnDup    = New-ProButton "Duplicate"   300 360 95 30
     $btnDel    = New-ProButton "Delete"      405 360 85 30
+    $script:managerBtnDel = $btnDel
     $btnSetDef = New-ProButton "Set default" 500 360 110 30
     $btnClose  = New-ProButton "Close"       660 360 90 30
     $btnUp     = New-ProButton "↑ Move up"   15 400 90 30
@@ -1618,17 +1620,25 @@ function Show-ProfileManager {
         Log "Duplicated profile: $($p.Name) → $newName" "Cyan"
     })
     $btnDel.Add_Click({
-        $p = Get-SelectedProfile
-        if (-not $p) { return }
-        if ($cfg.Profiles.Count -le 1) { [System.Windows.Forms.MessageBox]::Show("Cannot delete the last remaining profile.","Protected",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null; return }
-        if ([System.Windows.Forms.MessageBox]::Show("Delete profile '$($p.Name)'?`nIt will be kept in the Trash and can be restored.","Confirm Delete",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question) -eq 'Yes') {
-            $cfg.Profiles = @($cfg.Profiles | Where-Object { $_.Name -ne $p.Name })
-            $p.DeletedAt = Get-Date -Format "yyyy-MM-dd HH:mm"
-            $cfg.Trash = @(@($p) + @($cfg.Trash) | Select-Object -First 5)
-            if ($cfg.ActiveProfile -eq $p.Name) { $cfg.ActiveProfile = $cfg.Profiles[0].Name }
-            if ($cfg.DefaultProfile -eq $p.Name) { $cfg.DefaultProfile = $cfg.Profiles[0].Name }
-            Refresh-ManagerList
-            Log "Deleted profile: $($p.Name) (kept in trash)" "Yellow"
+        try {
+            $p = Get-SelectedProfile
+            if (-not $p) { return }
+            if ($cfg.Profiles.Count -le 1) { [System.Windows.Forms.MessageBox]::Show("Cannot delete the last remaining profile.","Protected",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null; return }
+            $yes = ($env:NVD_SELFTEST -eq "1")
+            if (-not $yes) { $yes = ([System.Windows.Forms.MessageBox]::Show("Delete profile '$($p.Name)'?`nIt will be kept in the Trash and can be restored.","Confirm Delete",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question) -eq 'Yes') }
+            if ($yes) {
+                $cfg.Profiles = @($cfg.Profiles | Where-Object { $_.Name -ne $p.Name })
+                # PSCustomObject cannot create a property by assignment - use Add-Member
+                Add-Member -InputObject $p -NotePropertyName "DeletedAt" -NotePropertyValue (Get-Date -Format "yyyy-MM-dd HH:mm") -Force
+                $cfg.Trash = @(@($p) + @($cfg.Trash) | Select-Object -First 5)
+                if ($cfg.ActiveProfile -eq $p.Name) { $cfg.ActiveProfile = $cfg.Profiles[0].Name }
+                if ($cfg.DefaultProfile -eq $p.Name) { $cfg.DefaultProfile = $cfg.Profiles[0].Name }
+                Refresh-ManagerList
+                Log "Deleted profile: $($p.Name) (kept in trash)" "Yellow"
+            }
+        } catch {
+            try { Write-SessionLog ("DELETE ERROR: " + $_.Exception.Message); $_ | Out-File (Join-Path $ScriptDir "error.log") -Encoding UTF8 -Force } catch { }
+            [System.Windows.Forms.MessageBox]::Show("Deleting the profile failed:`n$($_.Exception.Message)","Delete Error",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
         }
     })
     $btnSetDef.Add_Click({
@@ -2188,11 +2198,17 @@ if ($env:NVD_SELFTEST -eq "1") {
                 $shotT.Stop(); $shotT.Dispose()
                 try {
                     Save-WindowShot $script:managerForm (Join-Path $script:shotDir "02-profiles.png")
+                    # real delete through the UI (confirm auto-accepted in selftest)
+                    if ($script:managerLv -and $script:managerLv.Items.Count -gt 1) {
+                        $script:managerLv.Items[0].Selected = $true
+                        $script:managerBtnDel.PerformClick()
+                    }
                     if ($script:managerForm) { $script:managerForm.Close() }
-                } catch { }
+                } catch { StLog "manager tick error: $($_.Exception.Message)" }
             })
             $shotT.Start()
             Show-ProfileManager
+            StLog ("afterDelete: profiles={0} trash={1}" -f @($cfg.Profiles).Count, @($cfg.Trash).Count)
             $shotT2 = New-Object System.Windows.Forms.Timer
             $shotT2.Interval = 1200
             $shotT2.Add_Tick({
@@ -2322,19 +2338,26 @@ if ($env:NVD_DEMO -eq "1") {
     $script:demoT0 = Get-Date
     $script:demoLog = Join-Path $ScriptDir "demo-timeline.txt"
     Set-Content $script:demoLog -Value "0 demo-start" -Encoding UTF8
-    try { Add-Content $script:demoLog -Value ("t0-epoch " + [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) -Encoding UTF8 } catch { }
+    try { Add-Content $script:demoLog -Value ("t0-ms " + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) -Encoding UTF8 } catch { }
     function Demo-Mark($label) {
         try {
-            $secs = [int]((Get-Date) - $script:demoT0).TotalSeconds
-            Add-Content $script:demoLog -Value "$secs $label" -Encoding UTF8
+            $ms = [int]((Get-Date) - $script:demoT0).TotalMilliseconds
+            Add-Content $script:demoLog -Value "$ms $label" -Encoding UTF8
         } catch { }
     }
     function Demo-Wait($secs) {
         $n = [int]($secs * 10)
         for ($i = 0; $i -lt $n; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
     }
-    # position & size the window on the primary monitor for the camera (before Run)
-    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    # pick the best monitor for the demo (prefer a 16:9 1080p screen)
+    $script:demoScreen = $null
+    foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+        if ($s.Bounds.Width -eq 1920 -and $s.Bounds.Height -eq 1080) { $script:demoScreen = $s; break }
+    }
+    if (-not $script:demoScreen) { $script:demoScreen = [System.Windows.Forms.Screen]::PrimaryScreen }
+    $wa = $script:demoScreen.WorkingArea
+    try { Add-Content $script:demoLog -Value ("screen {0} {1} {2} {3}" -f $script:demoScreen.Bounds.X, $script:demoScreen.Bounds.Y, $script:demoScreen.Bounds.Width, $script:demoScreen.Bounds.Height) -Encoding UTF8 } catch { }
+    # position & size the window on that monitor for the camera (before Run)
     $form.WindowState = 'Normal'
     $form.Location = [System.Drawing.Point]::new($wa.X + 24, $wa.Y + 24)
     $form.ClientSize = [System.Drawing.Size]::new($wa.Width - 48, $wa.Height - 110)

@@ -1,0 +1,24 @@
+# Downloaded videos - keep the repository small
+Downloads/
+
+# Local data (personal paths, logs, temporary files)
+settings.json
+log.txt
+log.old.txt
+error.log
+selftest.txt
+*.part
+*.ytdl
+*.frag
+*.temp
+
+# ffmpeg.exe is larger than GitHub's 100 MB file limit.
+# It is fetched automatically from the app's Tools menu.
+ffmpeg.exe
+
+# yt-dlp.exe is a third-party binary (its own project/license).
+# It is fetched automatically from the app's Tools menu.
+yt-dlp.exe
+
+# Batch list - created automatically on first use.
+list.txt

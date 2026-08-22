@@ -22,3 +22,6 @@ yt-dlp.exe
 
 # Batch list - created automatically on first use.
 list.txt
+
+# Demo recording artifacts (NVD_DEMO mode)
+demo-timeline.txt

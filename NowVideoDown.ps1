@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.38)
+    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.40)
 .NOTES
     Requires:  yt-dlp.exe (+ ffmpeg.exe for merging/thumbnails)
                Place both next to this script.
@@ -203,7 +203,7 @@ $script:onDoneCallback = $null; $script:batchLinks = @(); $script:batchTotal = 0
 $script:lastDownloadedFile = $null; $script:isUpdatingUI = $false
 $script:jobExitCode = $null
 $script:runFolderOverride = $null; $script:isDirty = $false; $script:pasteDlTimer = $null
-$script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:aboutForm = $null; $script:managerForm = $null; $script:editorForm = $null
+$script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:aboutForm = $null; $script:managerForm = $null; $script:editorForm = $null; $script:editorNameBox = $null; $script:editorOkBtn = $null
 $script:clipLast = ""; $script:clipUrl = $null; $script:clipTimer = $null
 $script:updateJob = $null; $script:updTimer = $null; $script:ytdlpOutdated = $false; $script:ytdlpLocal = "?"
 # persistent session log (log.txt next to the script, capped + rotated)
@@ -244,7 +244,7 @@ function Get-ThemePalette($themeName) {
 
 # -- FORM SETUP ------------------------------------------------------------
 $form = New-Object System.Windows.Forms.Form
-$form.Text            = "Now Video Down - Pro Edition v2.38"
+$form.Text            = "Now Video Down - Pro Edition v2.40"
 $winW = if ($cfg.WinW -and $cfg.WinW -gt 500) { [int]$cfg.WinW } else { 900 }
 $winH = if ($cfg.WinH -and $cfg.WinH -gt 500) { [int]$cfg.WinH } else { 915 }
 $form.ClientSize      = [System.Drawing.Size]::new($winW, $winH)
@@ -349,7 +349,7 @@ $lblSub.Text = "YouTube | Facebook | Twitter/X | Instagram | TikTok | 1000+ site
 $lblSub.Font = $fSub; $lblSub.Location = [System.Drawing.Point]::new(20,65); $lblSub.AutoSize = $true
 
 $lblCredits = New-Object System.Windows.Forms.Label
-$lblCredits.Text = "v 2.38 Pro Edition - Nikos Georgousis"
+$lblCredits.Text = "v 2.40 Pro Edition - Nikos Georgousis"
 $lblCredits.Font = $fSub; $lblCredits.Location = [System.Drawing.Point]::new(620,40); $lblCredits.AutoSize = $true
 
 # Group 1: Source (GroupBox) - URL/batch row + clipboard detection row
@@ -897,7 +897,7 @@ function Show-AboutDialog {
         $lblTitleAbt.AutoSize = $true; $lblTitleAbt.ForeColor = $t.Accent
 
         $lblVer = New-Object System.Windows.Forms.Label
-        $lblVer.Text = "Pro Edition v2.38"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
+        $lblVer.Text = "Pro Edition v2.40"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
         $lblVer.AutoSize = $true; $lblVer.ForeColor = $t.Text
 
         $lblDesc = New-Object System.Windows.Forms.Label
@@ -1379,7 +1379,9 @@ function Show-ProfileEditor([string]$editName) {
     $gb3.Controls.AddRange(@($lblFmt,$cmbFormatE,$lblQual,$cmbQualityE,$chkAudioE,$cmbAudioFmtE,$chkSubsE,$lblLang,$cmbLang,$chkThumbE,$chkPlaylistE,$cmbAudioQualityE,$lblItems,$txtItems,$lblRate,$txtRate,$lblCookies,$txtCookies,$lblTpl,$txtTpl,$lblTplHint,$chkVerboseE))
     $frm.Controls.AddRange(@($gb1, $gb2, $gb3, $btnOK, $btnCancelE))
     $script:editorForm = $frm
-    $frm.Add_FormClosed({ try { $script:editorForm = $null } catch { } })
+    $script:editorNameBox = $txtName
+    $script:editorOkBtn = $btnOK
+    $frm.Add_FormClosed({ try { $script:editorForm = $null; $script:editorNameBox = $null; $script:editorOkBtn = $null } catch { } })
 
     # -- editor helper (defined BEFORE prefill calls it - PowerShell has no hoisting)
     function Update-EditorAudioState {
@@ -1453,7 +1455,8 @@ function Show-ProfileEditor([string]$editName) {
             Subfolder = ($cmbSub.Text -replace '\s*\(.*$','').Trim()
             AskDestination = $chkAsk.Checked
             FilenameTemplate = $txtTpl.Text.Trim(); RateLimit = $txtRate.Text.Trim(); CookiesFile = $txtCookies.Text.Trim()
-            Created = (Get-Date -Format "yyyy-MM-dd"); LastUsed = $null
+            Created = $(if ($isEdit -and $src) { $src.Created } else { (Get-Date -Format "yyyy-MM-dd") })
+            LastUsed = $(if ($isEdit -and $src) { $src.LastUsed } else { $null })
         }
         $frm.Close()
     })
@@ -1825,14 +1828,20 @@ $btnNewProf.Add_Click({
 })
 $btnEditProf.Add_Click({
     $curName = $cmbProfile.Text
+    if (-not $curName) { return }
     $edited = Show-ProfileEditor $curName
     if ($edited) {
-        $idx = $cmbProfile.Items.IndexOf($curName)
-        if ($idx -ge 0) { $cmbProfile.Items[$idx] = $edited.Name }
-        $cfg.ActiveProfile = $edited.Name
-        $script:isUpdatingUI = $true; $cmbProfile.SelectedItem = $edited.Name; $script:isUpdatingUI = $false
-        Sync-UI-To-Profile $edited.Name
-        Log "Profile updated: $($edited.Name)" "Lime"
+        $names = @($cfg.Profiles | ForEach-Object { $_.Name })
+        $idx = [Array]::IndexOf($names, $curName)
+        if ($idx -ge 0) {
+            $cfg.Profiles[$idx] = $edited
+            if ($cfg.ActiveProfile -eq $curName)  { $cfg.ActiveProfile = $edited.Name }
+            if ($cfg.DefaultProfile -eq $curName) { $cfg.DefaultProfile = $edited.Name }
+            Refresh-ProfileCombo
+            Log "Profile updated: $($edited.Name)" "Lime"
+        } else {
+            Log "Profile not found - nothing updated." "Yellow"
+        }
     }
 })
 $btnManageProf.Add_Click({ Show-ProfileManager })
@@ -2156,7 +2165,7 @@ $form.Add_Resize({
     }
 })
 
-Write-SessionLog "--- Now Video Down v2.38 started ---"
+Write-SessionLog "--- Now Video Down v2.40 started ---"
 
 # -- SELF-TEST HOOK (only when NVD_SELFTEST=1) -----------------------------
 # Reproduces the minimize→tray→restore cycle in-process and writes the
@@ -2228,6 +2237,44 @@ if ($env:NVD_SELFTEST -eq "1") {
             $edT.Start()
             Show-ProfileEditor $null
             StLog "afterEditor: ok"
+            # edit+rename regression: rename the ACTIVE profile through the real
+            # main-window Edit button, then re-edit must find the NEW name prefilled
+            try {
+                $script:editTestOrig = $cfg.ActiveProfile
+                $script:editTestNew  = $script:editTestOrig + " Renamed"
+                $edR1 = New-Object System.Windows.Forms.Timer
+                $edR1.Interval = 1200
+                $edR1.Add_Tick({
+                    $edR1.Stop(); $edR1.Dispose()
+                    try {
+                        if ($script:editorNameBox) { $script:editorNameBox.Text = $script:editTestNew }
+                        if ($script:editorOkBtn)   { $script:editorOkBtn.PerformClick() }
+                    } catch { StLog "editRename1 error: $($_.Exception.Message)" }
+                })
+                $edR1.Start()
+                $btnEditProf.PerformClick()
+                $hasNew = $null -ne ($cfg.Profiles | Where-Object { $_.Name -eq $script:editTestNew })
+                $hasOld = $null -ne ($cfg.Profiles | Where-Object { $_.Name -eq $script:editTestOrig })
+                StLog ("afterEditRename: hasNew={0} hasOld={1} active={2}" -f $hasNew, $hasOld, $cfg.ActiveProfile)
+                # re-edit the renamed profile - the editor must prefill the new name
+                $edR2 = New-Object System.Windows.Forms.Timer
+                $edR2.Interval = 1200
+                $edR2.Add_Tick({
+                    $edR2.Stop(); $edR2.Dispose()
+                    try {
+                        StLog ("afterReEdit prefill: '{0}'" -f $script:editorNameBox.Text)
+                        if ($script:editorForm) { $script:editorForm.Close() }
+                    } catch { StLog "editRename2 error: $($_.Exception.Message)" }
+                })
+                $edR2.Start()
+                $btnEditProf.PerformClick()
+                # restore the original name so settings stay coherent
+                $pB = $cfg.Profiles | Where-Object { $_.Name -eq $script:editTestNew }
+                if ($pB) { $pB.Name = $script:editTestOrig }
+                $cfg.ActiveProfile = $script:editTestOrig
+                Refresh-ProfileCombo
+                StLog "afterEditRestore: ok"
+            } catch { StLog "editRenameTest error: $($_.Exception.Message)" }
             $form.WindowState = 'Minimized'
             for ($i = 0; $i -lt 20; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
             StLog "afterMinimize: inTray=$script:inTray formVisible=$($form.Visible) trayVisible=$($script:tray.Visible) state=$($form.WindowState)"

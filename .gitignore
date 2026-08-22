@@ -25,3 +25,8 @@ list.txt
 
 # Demo recording artifacts (NVD_DEMO mode)
 demo-timeline.txt
+
+# Demo/recording outputs - big, regenerated each take
+*-Demo*.mp4
+raw-*.yuv
+subs.ass

@@ -200,7 +200,7 @@ $script:onDoneCallback = $null; $script:batchLinks = @(); $script:batchTotal = 0
 $script:lastDownloadedFile = $null; $script:isUpdatingUI = $false
 $script:jobExitCode = $null
 $script:runFolderOverride = $null; $script:isDirty = $false; $script:pasteDlTimer = $null
-$script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:aboutForm = $null
+$script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:aboutForm = $null; $script:managerForm = $null
 $script:clipLast = ""; $script:clipUrl = $null; $script:clipTimer = $null
 # persistent session log (log.txt next to the script, capped + rotated)
 $script:logFile = Join-Path $ScriptDir "log.txt"
@@ -1317,6 +1317,7 @@ function Show-ProfileEditor([string]$editName) {
 function Show-ProfileManager {
     $t = Get-ThemePalette $cfg.Theme
     $frm = New-Object System.Windows.Forms.Form
+    $script:managerForm = $frm
     $frm.Text = "Manage Profiles"
     $frm.Size = [System.Drawing.Size]::new(780, 560)
     $frm.StartPosition = 'CenterParent'; $frm.FormBorderStyle = 'FixedDialog'
@@ -1579,7 +1580,7 @@ function Show-ProfileManager {
     })
 
     $lv.Add_DoubleClick({ if ($lv.SelectedItems.Count) { $btnEdit.PerformClick() } })
-    $frm.Add_FormClosed({ Refresh-ProfileCombo; Save-Settings $form $cfg })
+    $frm.Add_FormClosed({ Refresh-ProfileCombo; Save-Settings $form $cfg; $script:managerForm = $null })
     Refresh-ManagerList
     [void]$frm.ShowDialog()
 }
@@ -1999,6 +2000,51 @@ if ($env:NVD_SELFTEST -eq "1") {
         function StLog($line) { $script:res += $line; try { $script:res | Set-Content (Join-Path $ScriptDir "selftest.txt") -Encoding UTF8 } catch { } }
         try {
             StLog "selftest: started"
+            # --- screenshots (Screenshots folder) ---
+            $script:shotDir = Join-Path $ScriptDir "Screenshots"
+            try { New-Item -ItemType Directory -Path $script:shotDir -Force | Out-Null } catch { }
+            function Save-WindowShot($frm2, $path) {
+                try {
+                    if (-not $frm2) { StLog "shot: no form -> $path"; return }
+                    if (-not $frm2.Visible) { StLog "shot: invisible -> $path"; return }
+                    [void]$frm2.Activate()
+                    [System.Windows.Forms.Application]::DoEvents()
+                    $bounds = $frm2.Bounds
+                    StLog "shot: bounds $($bounds.X),$($bounds.Y) $($bounds.Width)x$($bounds.Height)"
+                    $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
+                    $g = [System.Drawing.Graphics]::FromImage($bmp)
+                    $g.CopyFromScreen($bounds.X, $bounds.Y, 0, 0, (New-Object System.Drawing.Size($bounds.Width, $bounds.Height)))
+                    $g.Dispose()
+                    $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+                    $bmp.Dispose()
+                    StLog "shot saved: $(Split-Path $path -Leaf)"
+                } catch { StLog "shot error: $($_.Exception.Message)" }
+            }
+            try { $txtUrl.Text = "https://www.youtube.com/watch?v=dQw4w9WgXcQ" } catch { }
+            Save-WindowShot $form (Join-Path $script:shotDir "01-main.png")
+            $shotT = New-Object System.Windows.Forms.Timer
+            $shotT.Interval = 1200
+            $shotT.Add_Tick({
+                $shotT.Stop(); $shotT.Dispose()
+                try {
+                    Save-WindowShot $script:managerForm (Join-Path $script:shotDir "02-profiles.png")
+                    if ($script:managerForm) { $script:managerForm.Close() }
+                } catch { }
+            })
+            $shotT.Start()
+            Show-ProfileManager
+            $shotT2 = New-Object System.Windows.Forms.Timer
+            $shotT2.Interval = 1200
+            $shotT2.Add_Tick({
+                $shotT2.Stop(); $shotT2.Dispose()
+                try {
+                    Save-WindowShot $script:aboutForm (Join-Path $script:shotDir "03-about.png")
+                    if ($script:aboutForm) { $script:aboutForm.Close() }
+                } catch { }
+            })
+            $shotT2.Start()
+            Show-AboutDialog
+            StLog "shots: captured"
             $form.WindowState = 'Minimized'
             for ($i = 0; $i -lt 20; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
             StLog "afterMinimize: inTray=$script:inTray formVisible=$($form.Visible) trayVisible=$($script:tray.Visible) state=$($form.WindowState)"

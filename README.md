@@ -19,6 +19,14 @@ so you never have to touch the command line.
 - Ten color themes, dark and light
 - Portable: no installer, no account, no registry entries - the whole app is one folder
 
+## Screenshots
+
+![Main window](Screenshots/01-main.png)
+
+![Manage profiles](Screenshots/02-profiles.png)
+
+![About](Screenshots/03-about.png)
+
 ## Getting started
 
 1. Download the folder (or the zip from Releases) and put it anywhere you like - Desktop, a USB stick, wherever.

@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.40)
+    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.42)
 .NOTES
     Requires:  yt-dlp.exe (+ ffmpeg.exe for merging/thumbnails)
                Place both next to this script.
@@ -22,6 +22,79 @@ public static extern bool SetProcessDPIAware();
 "@ -ErrorAction Stop
     [Win32.NativeMethods]::SetProcessDPIAware() | Out-Null
 } catch { }
+
+# -- STARTUP SPLASH ----------------------------------------------------------
+# The main window is only built and shown at the very end (Application.Run),
+# so on slower machines / right after logon there can be seconds of silence.
+# Show a small branded window immediately: the user always sees it is loading.
+$script:splashForm = $null; $script:splashStatus = $null; $script:splashImg = $null
+function Show-StartupSplash {
+    try {
+        $cBg     = [System.Drawing.ColorTranslator]::FromHtml("#0b132b")
+        $cAccent = [System.Drawing.ColorTranslator]::FromHtml("#5bc0be")
+        $cText   = [System.Drawing.Color]::White
+        $cSub    = [System.Drawing.ColorTranslator]::FromHtml("#9fb1cc")
+        $f = New-Object System.Windows.Forms.Form
+        $f.Text = "Now Video Down"
+        $f.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+        $f.StartPosition = 'CenterScreen'
+        $f.Size = [System.Drawing.Size]::new(440, 176)
+        $f.BackColor = $cBg
+        $f.ShowInTaskbar = $false
+        $f.TopMost = $true
+        $f.ControlBox = $false
+        $pb = New-Object System.Windows.Forms.PictureBox
+        $pb.Location = [System.Drawing.Point]::new(22, 24)
+        $pb.Size = [System.Drawing.Size]::new(88, 88)
+        $pb.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+        $pb.BackColor = $cBg
+        try {
+            $logoPath = Join-Path $PSScriptRoot "NowVideoDown-Logo.png"
+            if (Test-Path $logoPath) {
+                $fs = [System.IO.File]::OpenRead($logoPath)
+                $src = [System.Drawing.Image]::FromStream($fs)
+                $script:splashImg = New-Object System.Drawing.Bitmap($src)
+                $src.Dispose(); $fs.Dispose()
+                $pb.Image = $script:splashImg
+            }
+        } catch { try { $fs.Dispose() } catch { } }
+        if (-not $pb.Image) {
+            try {
+                $ic = Join-Path $PSScriptRoot "app.ico"
+                if (Test-Path $ic) { $pb.Image = (New-Object System.Drawing.Icon($ic)).ToBitmap() }
+            } catch { }
+        }
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = "Now Video Down"
+        $lblTitle.Font = New-Object System.Drawing.Font("Segoe UI", 15, [System.Drawing.FontStyle]::Bold)
+        $lblTitle.ForeColor = $cText; $lblTitle.BackColor = $cBg
+        $lblTitle.Location = [System.Drawing.Point]::new(124, 30); $lblTitle.AutoSize = $true
+        $script:splashStatus = New-Object System.Windows.Forms.Label
+        $script:splashStatus.Text = "Loading... please wait"
+        $script:splashStatus.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+        $script:splashStatus.ForeColor = $cSub; $script:splashStatus.BackColor = $cBg
+        $script:splashStatus.Location = [System.Drawing.Point]::new(126, 66); $script:splashStatus.AutoSize = $true
+        $bar = New-Object System.Windows.Forms.Panel
+        $bar.BackColor = $cAccent
+        $bar.Location = [System.Drawing.Point]::new(0, 172); $bar.Size = [System.Drawing.Size]::new(440, 4)
+        $f.Controls.AddRange(@($pb, $lblTitle, $script:splashStatus, $bar))
+        $script:splashForm = $f
+        $f.Show()
+        for ($i = 0; $i -lt 6; $i++) { [System.Windows.Forms.Application]::DoEvents() }
+    } catch { try { $script:splashForm = $null } catch { } }
+}
+function Update-StartupSplash([string]$text) {
+    try {
+        if ($script:splashStatus) { $script:splashStatus.Text = $text }
+        for ($i = 0; $i -lt 2; $i++) { [System.Windows.Forms.Application]::DoEvents() }
+    } catch { }
+}
+function Close-StartupSplash {
+    try { if ($script:splashImg) { $script:splashImg.Dispose() } } catch { }
+    try { if ($script:splashForm) { $script:splashForm.Close() } } catch { }
+    $script:splashForm = $null; $script:splashStatus = $null; $script:splashImg = $null
+}
+Show-StartupSplash
 
 # -- NOTIFICATION SUPPORT TYPES --------------------------------------------
 # A borderless form that never steals focus (WS_EX_NOACTIVATE) - used for the
@@ -68,14 +141,25 @@ function Get-ActiveList {
 }
 
 $SettingsFile   = Join-Path $ScriptDir "settings.json"
+
+# -- LEGACY MIGRATION (one-time, then retired) ------------------------------
+# The very first versions of the app stored settings in %APPDATA%. Everything
+# now lives in ONE local settings.json next to the script. If an ancient copy
+# still exists, import it once into the local file and then delete the old
+# location - from now on there is exactly one settings file.
 $OldSettingsFile = Join-Path $env:APPDATA "VideoDownloader\settings.json"
-
-# first run = no settings here AND no legacy settings to migrate
-$script:isFirstRun = -not ((Test-Path $SettingsFile) -or (Test-Path $OldSettingsFile))
-
-if (-not (Test-Path $SettingsFile) -and (Test-Path $OldSettingsFile)) {
-    try { Copy-Item -Path $OldSettingsFile -Destination $SettingsFile -Force | Out-Null } catch {}
+if (Test-Path $OldSettingsFile) {
+    try {
+        if (-not (Test-Path $SettingsFile)) {
+            Copy-Item $OldSettingsFile -Destination $SettingsFile -Force -ErrorAction Stop
+        }
+        # whether just imported or long superseded, the old location is retired
+        Remove-Item $OldSettingsFile -Force -ErrorAction Stop
+    } catch { }
 }
+
+# first run = no local settings file (a migrated legacy copy counts as run)
+$script:isFirstRun = -not (Test-Path $SettingsFile)
 if (-not (Test-Path $DownloadFolder)) { New-Item -ItemType Directory $DownloadFolder -Force | Out-Null }
 
 # -- SINGLE INSTANCE GUARD ---------------------------------------------------
@@ -83,6 +167,7 @@ if (-not (Test-Path $DownloadFolder)) { New-Item -ItemType Directory $DownloadFo
 $script:isFirstInstance = $false
 $script:appMutex = New-Object System.Threading.Mutex($true, "NowVideoDown-SingleInstance", [ref]$script:isFirstInstance)
 if (-not $script:isFirstInstance -and $env:NVD_SELFTEST -ne "1" -and $env:NVD_DEMO -ne "1") {
+    Close-StartupSplash
     [System.Windows.Forms.MessageBox]::Show(
         "Now Video Down is already running.`n`nIf you minimized it to the tray, look for its icon next to the clock - or inside the hidden icons area (the ^ arrow) - and double-click it to restore the window.",
         "Now Video Down - Already Running",
@@ -95,6 +180,7 @@ if (-not $script:isFirstInstance -and $env:NVD_SELFTEST -ne "1" -and $env:NVD_DE
 # The launchers hide the console, so an unhandled error would be invisible.
 # Log it to error.log next to the script and show a message box before exiting.
 trap {
+    Close-StartupSplash
     $errRec = $_
     try { $errRec | Out-File (Join-Path $ScriptDir "error.log") -Encoding UTF8 -Force } catch { }
     try {
@@ -113,7 +199,7 @@ function New-ProfileObj($name) {
         Name=$name; Description=""; Format="mp4"; Quality="Best"; AudioOnly=$false
         AudioFormat="mp3"; AudioQuality="Best"; Subs=$false; SubLang="en"; Thumb=$false; Playlist=$false; PlaylistRange=""
         Verbose=$true; Folder=$DownloadFolder; Subfolder=""; AskDestination=$false
-        FilenameTemplate=""; RateLimit=""; CookiesFile=""
+        FilenameTemplate=""; RateLimit=""; CookiesFile=""; CookiesBrowser=""
         Created=(Get-Date -Format "yyyy-MM-dd"); LastUsed=$null; DeletedAt=$null
     }
 }
@@ -186,6 +272,18 @@ function Save-Settings($frm, $cfgObj) {
 }
 $cfg = Load-Settings
 
+# If the local file was created from an ancient single-option layout (no
+# Profiles yet), immediately re-persist the normalized config so the one file
+# is always in the current format after a migration.
+try {
+    if (Test-Path $SettingsFile) {
+        $raw = Get-Content $SettingsFile -Raw | ConvertFrom-Json
+        if ($null -eq $raw.Profiles -and $cfg -and $cfg.Profiles) {
+            $cfg | ConvertTo-Json -Depth 4 | Set-Content $SettingsFile -Encoding UTF8 -Force
+        }
+    }
+} catch { }
+
 # -- DEPENDENCY DETECTION --------------------------------------------------
 function Find-Tool($name) {
     $loc = Join-Path $ScriptDir $name
@@ -201,9 +299,12 @@ $script:ffmpeg = Find-Tool "ffmpeg.exe"
 $script:cancelRequested = $false; $script:activeJob = $null; $script:activeTimer = $null; $script:delayTimer = $null
 $script:onDoneCallback = $null; $script:batchLinks = @(); $script:batchTotal = 0; $script:batchDone = 0; $script:batchOk = 0; $script:batchFail = 0
 $script:lastDownloadedFile = $null; $script:isUpdatingUI = $false
+$script:lastDlUrl = $null; $script:lastDlError = ""
 $script:jobExitCode = $null
 $script:runFolderOverride = $null; $script:isDirty = $false; $script:pasteDlTimer = $null
-$script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:aboutForm = $null; $script:managerForm = $null; $script:editorForm = $null; $script:editorNameBox = $null; $script:editorOkBtn = $null; $script:wizardForm = $null
+$script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:notifCloseTimer = $null; $script:notifFailUrl = ""; $script:notifXBtn = $null; $script:notifXColor = $null; $script:notifXHover = $null; $script:aboutForm = $null; $script:managerForm = $null; $script:editorForm = $null; $script:editorNameBox = $null; $script:editorOkBtn = $null; $script:editorCookiesBox = $null; $script:editorG4 = $null; $script:editorG3 = $null; $script:wizardForm = $null; $script:wizardThemeBox = $null; $script:editorMap = $null; $script:inputBoxForm = $null; $script:inputBoxText = $null; $script:inputBoxOk = $null
+$script:managerBtnNew = $null; $script:managerBtnEdit = $null; $script:managerBtnRename = $null; $script:managerBtnDup = $null; $script:managerBtnSetDef = $null; $script:managerBtnUp = $null; $script:managerBtnDown = $null; $script:managerBtnExport = $null; $script:managerBtnExpAll = $null; $script:managerBtnImport = $null; $script:managerBtnTrash = $null; $script:managerBtnClose = $null
+$script:trashForm = $null; $script:trashList = $null; $script:trashBtnRestore = $null; $script:trashBtnPurge = $null; $script:trashBtnClose = $null
 $script:clipLast = ""; $script:clipUrl = $null; $script:clipTimer = $null
 $script:updateJob = $null; $script:updTimer = $null; $script:ytdlpOutdated = $false; $script:ytdlpLocal = "?"
 # persistent session log (log.txt next to the script, capped + rotated)
@@ -243,8 +344,9 @@ function Get-ThemePalette($themeName) {
 }
 
 # -- FORM SETUP ------------------------------------------------------------
+Update-StartupSplash "Building the main window..."
 $form = New-Object System.Windows.Forms.Form
-$form.Text            = "Now Video Down - Pro Edition v2.40"
+$form.Text            = "Now Video Down - Pro Edition v2.42"
 $winW = if ($cfg.WinW -and $cfg.WinW -gt 500) { [int]$cfg.WinW } else { 900 }
 $winH = if ($cfg.WinH -and $cfg.WinH -gt 500) { [int]$cfg.WinH } else { 915 }
 $form.ClientSize      = [System.Drawing.Size]::new($winW, $winH)
@@ -349,7 +451,7 @@ $lblSub.Text = "YouTube | Facebook | Twitter/X | Instagram | TikTok | 1000+ site
 $lblSub.Font = $fSub; $lblSub.Location = [System.Drawing.Point]::new(20,65); $lblSub.AutoSize = $true
 
 $lblCredits = New-Object System.Windows.Forms.Label
-$lblCredits.Text = "v 2.40 Pro Edition - Nikos Georgousis"
+$lblCredits.Text = "v 2.42 Pro Edition - Nikos Georgousis"
 $lblCredits.Font = $fSub; $lblCredits.Location = [System.Drawing.Point]::new(620,40); $lblCredits.AutoSize = $true
 
 # Group 1: Source (GroupBox) - URL/batch row + clipboard detection row
@@ -516,19 +618,20 @@ function Set-CancelButtonState([bool]$active) {
 # DARK / LIGHT TITLE BAR (follows the theme) - defined here because
 # Apply-Theme calls it at SCRIPT LOAD, and PowerShell does not hoist
 # function definitions to earlier statements.
-function Apply-DarkTitleBar([bool]$dark, $palette) {
+function Apply-DarkTitleBar([bool]$dark, $palette, $targetForm = $null) {
     try {
         if (-not ("Win32.Dwm" -as [type])) { return }
-        [void]$form.Handle
+        $h = $(if ($targetForm) { $targetForm.Handle } else { $form.Handle })
+        [void]$h
         $v = if ($dark) { 1 } else { 0 }
-        [void][Win32.Dwm]::DwmSetWindowAttribute($form.Handle, 20, [ref]$v, 4)   # Win11
-        [void][Win32.Dwm]::DwmSetWindowAttribute($form.Handle, 19, [ref]$v, 4)   # Win10
+        [void][Win32.Dwm]::DwmSetWindowAttribute($h, 20, [ref]$v, 4)   # Win11
+        [void][Win32.Dwm]::DwmSetWindowAttribute($h, 19, [ref]$v, 4)   # Win10
         try {
             # caption + caption text colors (Win11 22H2+); harmless if unsupported
             $cap = [System.Drawing.ColorTranslator]::ToWin32($palette.Panel)
             $capTxt = [System.Drawing.ColorTranslator]::ToWin32($palette.Text)
-            [void][Win32.Dwm]::DwmSetWindowAttribute($form.Handle, 33, [ref]$cap, 4)
-            [void][Win32.Dwm]::DwmSetWindowAttribute($form.Handle, 34, [ref]$capTxt, 4)
+            [void][Win32.Dwm]::DwmSetWindowAttribute($h, 33, [ref]$cap, 4)
+            [void][Win32.Dwm]::DwmSetWindowAttribute($h, 34, [ref]$capTxt, 4)
         } catch { }
     } catch { }
 }
@@ -599,7 +702,7 @@ function Show-FirstRunWizard {
         $frm.BackColor = $t.Bg; $frm.ForeColor = $t.Text
         if (Test-Path $IconPath) { try { $frm.Icon = New-Object System.Drawing.Icon($IconPath) } catch { } }
         $script:wizardForm = $frm
-        $frm.Add_FormClosed({ try { $script:wizardForm = $null } catch { } })
+        $frm.Add_FormClosed({ try { $script:wizardForm = $null; $script:wizardThemeBox = $null } catch { } })
 
         $lblHello = New-Object System.Windows.Forms.Label
         $lblHello.Text = "Welcome! Two quick choices and you are ready to download."
@@ -625,6 +728,7 @@ function Show-FirstRunWizard {
         $ThemesList | ForEach-Object { [void]$cmbThemeW.Items.Add($_) }
         $ti = $cmbThemeW.Items.IndexOf($cfg.Theme); if ($ti -ge 0) { $cmbThemeW.SelectedIndex = $ti } else { $cmbThemeW.SelectedIndex = 0 }
         $gb2.Controls.AddRange(@($cmbThemeW))
+        $script:wizardThemeBox = $cmbThemeW
 
         $gb3 = New-Object System.Windows.Forms.GroupBox
         $gb3.Text = "3. DOWNLOADS FOLDER"; $gb3.Font = $fBold; $gb3.ForeColor = $t.Accent
@@ -663,6 +767,26 @@ function Show-FirstRunWizard {
                 Log "First-run setup complete." "Lime"
             } catch { }
             $frm.Close()
+        })
+        # LIVE THEME PREVIEW: recoloring the wizard itself as the user scrolls
+        # the list, so the choice is made from a real look, not a name guess.
+        $cmbThemeW.Add_SelectedIndexChanged({
+            try {
+                $pt = Get-ThemePalette $cmbThemeW.Text
+                $frm.BackColor = $pt.Bg; $frm.ForeColor = $pt.Text
+                $lblHello.ForeColor = $pt.Sub
+                $lblYt.ForeColor = $pt.Text; $lblFfmpeg.ForeColor = $pt.Text
+                if ($script:ytdlp)  { $lblYtState.ForeColor = $pt.Success }  else { $lblYtState.ForeColor = $pt.Warn }
+                if ($script:ffmpeg) { $lblFfmpegState.ForeColor = $pt.Success } else { $lblFfmpegState.ForeColor = $pt.Warn }
+                @($gb1, $gb2, $gb3) | ForEach-Object { $_.ForeColor = $pt.Accent }
+                $cmbThemeW.BackColor = $pt.Entry; $cmbThemeW.ForeColor = $pt.Text
+                $txtFolderW.BackColor = $pt.Entry; $txtFolderW.ForeColor = $pt.Text
+                Style-Button $btnOkW $pt.Success (HexToCol "#ffffff") $pt.IsDark
+                Style-Button $btnSkipW $pt.BtnGray $pt.Text $pt.IsDark
+                Style-Button $btnBrowseW $pt.BtnGray $pt.Text $pt.IsDark
+                Apply-DarkTitleBar $pt.IsDark $pt $frm
+                $frm.Invalidate($true)
+            } catch { }
         })
         $frm.Controls.AddRange(@($lblHello, $gb1, $gb2, $gb3, $btnOkW, $btnSkipW))
         [void]$frm.ShowDialog()
@@ -854,6 +978,7 @@ $tooltip.SetToolTip($btnClipIgnore,    "Ignore this URL")
 
 Update-UIState -ResetStatus
 Apply-Theme $cfg.Theme
+Update-StartupSplash "Checking yt-dlp and tools..."
 Check-YtDlpVersion
 
 # -- ABOUT MENU WIRING -----------------------------------------------------
@@ -899,7 +1024,7 @@ function Show-AboutDialog {
         $lblTitleAbt.AutoSize = $true; $lblTitleAbt.ForeColor = $t.Accent
 
         $lblVer = New-Object System.Windows.Forms.Label
-        $lblVer.Text = "Pro Edition v2.40"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
+        $lblVer.Text = "Pro Edition v2.42"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
         $lblVer.AutoSize = $true; $lblVer.ForeColor = $t.Text
 
         $lblDesc = New-Object System.Windows.Forms.Label
@@ -989,6 +1114,8 @@ function Get-SafeInputBox($title, $prompt) {
     Style-Button $btnCancel $t.BtnGray $t.Text $t.IsDark
     $frm.Controls.AddRange(@($lbl,$txt,$btnOk,$btnCancel))
     $frm.AcceptButton = $btnOk; $frm.CancelButton = $btnCancel
+    $script:inputBoxForm = $frm; $script:inputBoxText = $txt; $script:inputBoxOk = $btnOk
+    $frm.Add_FormClosed({ try { $script:inputBoxForm = $null; $script:inputBoxText = $null; $script:inputBoxOk = $null } catch { } })
     if ($frm.ShowDialog() -eq 'OK' -and $txt.Text.Trim() -ne "") { return $txt.Text.Trim() }
     return $null
 }
@@ -1068,6 +1195,7 @@ function Get-YtdlpArgs($url) {
     elseif ($p -and $p.PlaylistRange) { $a.AddRange([string[]]@('--playlist-items',$p.PlaylistRange)) }
     if ($p -and $p.RateLimit)      { $a.AddRange([string[]]@('--limit-rate',$p.RateLimit)) }
     if ($p -and $p.CookiesFile -and (Test-Path $p.CookiesFile)) { $a.AddRange([string[]]@('--cookies',$p.CookiesFile)) }
+    elseif ($p -and $p.CookiesBrowser) { $a.AddRange([string[]]@('--cookies-from-browser',$p.CookiesBrowser)) }
     $a.AddRange([string[]]@('--newline','--no-warnings','-o',$outTpl,$url))
     return $a.ToArray()
 }
@@ -1083,6 +1211,7 @@ function Start-Download($url, [scriptblock]$callback) {
 
     $script:onDoneCallback = $callback; $script:cancelRequested = $false; Set-CancelButtonState $true; $btnPlayLast.Visible = $false; SetProgress 0
     $script:jobExitCode = $null
+    $script:lastDlUrl = $url; $script:lastDlError = ""
     $script:knownPIDs = @(Get-Process -Name 'yt-dlp','ffmpeg' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Id)
     $lblSpeed.Text = "-"; $lblEta.Text = "-"
     $ytExe = $script:ytdlp; $dlArgs = Get-YtdlpArgs $url
@@ -1125,7 +1254,7 @@ function Start-Download($url, [scriptblock]$callback) {
                     SetStatus "Post-processing with ffmpeg..."
                     if ($chkVerbose.Checked -and $s.Trim()) { Log $s }
                 } 
-                elseif ($s -match 'ERROR:') { Log $s "Red"; SetStatus "Error - see log" } 
+                elseif ($s -match 'ERROR:') { Log $s "Red"; SetStatus "Error - see log"; if ([string]::IsNullOrWhiteSpace($script:lastDlError)) { $script:lastDlError = ($s -replace '^ERROR:\s*','').Trim() } } 
                 elseif ($s.Trim() -ne '') { if ($chkVerbose.Checked -and -not $s.StartsWith("[debug]", [System.StringComparison]::OrdinalIgnoreCase)) { Log $s } }
             }
 
@@ -1137,7 +1266,7 @@ function Start-Download($url, [scriptblock]$callback) {
                     foreach ($r in $rem) { 
                         $s = [string]$r
                         if ($s -match '^__EXITCODE__:(\d+)') { $script:jobExitCode = [int]$Matches[1]; continue }
-                        if ($s.Trim() -ne '') { if ($s -match 'ERROR:') { Log $s "Red" } elseif ($chkVerbose.Checked -and -not $s.StartsWith("[debug]", [System.StringComparison]::OrdinalIgnoreCase)) { Log $s } } 
+                        if ($s.Trim() -ne '') { if ($s -match 'ERROR:') { Log $s "Red"; if ([string]::IsNullOrWhiteSpace($script:lastDlError)) { $script:lastDlError = ($s -replace '^ERROR:\s*','').Trim() } } elseif ($chkVerbose.Checked -and -not $s.StartsWith("[debug]", [System.StringComparison]::OrdinalIgnoreCase)) { Log $s } } 
                     }
                 } catch {}
                 
@@ -1187,7 +1316,9 @@ function Start-SingleDownload {
             Notify-Completed $true ("Saved to: " + (Get-SafeFileName $script:lastDownloadedFile))
         } else {
             SetStatus "Download failed - check the log."
-            Notify-Completed $false "Check the log for details."
+            # use the script-scoped URL, not the closure: the async callback may
+            # fire after this scope is cleaned up and see $url as $null
+            Notify-Completed $false "The download could not be completed." $script:lastDlUrl
         }
     }
 }
@@ -1241,6 +1372,9 @@ function Update-ProfileSummary {
     if ($chkSubs.Checked)  { $parts += "Subs" }
     if ($chkThumb.Checked) { $parts += "Thumb" }
     if ($chkPlaylist.Checked) { $parts += "Playlist" }
+    $cp = Get-ActiveProfile
+    if ($cp -and $cp.CookiesBrowser) { $parts += ("Login: " + (Get-Culture).TextInfo.ToTitleCase($cp.CookiesBrowser)) }
+    elseif ($cp -and $cp.CookiesFile) { $parts += "Login: cookies.txt" }
     $folder = $cmbFolder.Text.Trim(); if (-not $folder) { $folder = "Downloads (default)" }
     if ($chkQuick.Checked) { $lblProfileSummary.Text = "QUICK SESSION - not saved to any profile:  " + ($parts -join " · ") + "  →  " + $folder }
     else { $lblProfileSummary.Text = ($parts -join " · ") + "  →  " + $folder }
@@ -1304,7 +1438,7 @@ function Show-ProfileEditor([string]$editName) {
 
     $frm = New-Object System.Windows.Forms.Form
     $frm.Text = if ($isEdit) { "Edit Profile - $editName" } else { "New Profile" }
-    $frm.Size = [System.Drawing.Size]::new(640, 640)
+    $frm.Size = [System.Drawing.Size]::new(640, 750)
     $frm.StartPosition = 'CenterParent'; $frm.FormBorderStyle = 'FixedDialog'
     $frm.MaximizeBox = $false; $frm.MinimizeBox = $false
     $frm.BackColor = $t.Bg; $frm.ForeColor = $t.Text
@@ -1357,20 +1491,35 @@ function Show-ProfileEditor([string]$editName) {
     $txtItems = New-Object System.Windows.Forms.TextBox; $txtItems.Location = [System.Drawing.Point]::new(75,92); $txtItems.Size = [System.Drawing.Size]::new(110,26); $txtItems.BackColor = $t.Entry; $txtItems.ForeColor = $t.Text
     $lblRate = New-Object System.Windows.Forms.Label; $lblRate.Text = "Rate:"; $lblRate.Location = [System.Drawing.Point]::new(200,96); $lblRate.AutoSize = $true; $lblRate.ForeColor = $t.Text
     $txtRate = New-Object System.Windows.Forms.TextBox; $txtRate.Location = [System.Drawing.Point]::new(245,92); $txtRate.Size = [System.Drawing.Size]::new(80,26); $txtRate.BackColor = $t.Entry; $txtRate.ForeColor = $t.Text
-    $lblCookies = New-Object System.Windows.Forms.Label; $lblCookies.Text = "Cookies:"; $lblCookies.Location = [System.Drawing.Point]::new(340,96); $lblCookies.AutoSize = $true; $lblCookies.ForeColor = $t.Text
-    $txtCookies = New-Object System.Windows.Forms.TextBox; $txtCookies.Location = [System.Drawing.Point]::new(400,92); $txtCookies.Size = [System.Drawing.Size]::new(175,26); $txtCookies.BackColor = $t.Entry; $txtCookies.ForeColor = $t.Text
     $lblTpl = New-Object System.Windows.Forms.Label; $lblTpl.Text = "File name template:"; $lblTpl.Location = [System.Drawing.Point]::new(15,128); $lblTpl.AutoSize = $true; $lblTpl.ForeColor = $t.Text
     $txtTpl = New-Object System.Windows.Forms.TextBox; $txtTpl.Location = [System.Drawing.Point]::new(130,124); $txtTpl.Size = [System.Drawing.Size]::new(445,26); $txtTpl.BackColor = $t.Entry; $txtTpl.ForeColor = $t.Text
     $lblTplHint = New-Object System.Windows.Forms.Label; $lblTplHint.Text = "Leave empty for the default %(title)s.%(ext)s. Example: %(uploader)s - %(title)s.%(ext)s"; $lblTplHint.Location = [System.Drawing.Point]::new(15,155); $lblTplHint.Size = [System.Drawing.Size]::new(565,16); $lblTplHint.Font = $fSub; $lblTplHint.ForeColor = $t.Sub
     $chkVerboseE = New-Object System.Windows.Forms.CheckBox; $chkVerboseE.Text = "Verbose log"; $chkVerboseE.Location = [System.Drawing.Point]::new(15,177); $chkVerboseE.AutoSize = $true; $chkVerboseE.ForeColor = $t.Text
 
+    # -- Section 4: login & cookies (separate group so it stands apart from output)
+    $gb4 = New-Object System.Windows.Forms.GroupBox
+    $gb4.Text = "LOGIN & COOKIES"; $gb4.Font = $fBold; $gb4.ForeColor = $t.Accent
+    $gb4.Location = [System.Drawing.Point]::new(15,474); $gb4.Size = [System.Drawing.Size]::new(595,152)
+    $lblLoginE = New-Object System.Windows.Forms.Label; $lblLoginE.Text = "Use login from:"; $lblLoginE.Location = [System.Drawing.Point]::new(15,34); $lblLoginE.AutoSize = $true; $lblLoginE.ForeColor = $t.Text
+    $cmbCookiesE = New-Object System.Windows.Forms.ComboBox; $cmbCookiesE.Location = [System.Drawing.Point]::new(135,30); $cmbCookiesE.Size = [System.Drawing.Size]::new(170,26); $cmbCookiesE.DropDownStyle = 'DropDownList'; $cmbCookiesE.FlatStyle = 'Flat'; $cmbCookiesE.BackColor = $t.Entry; $cmbCookiesE.ForeColor = $t.Text
+    @('None','Brave','Chrome','Edge','Firefox') | ForEach-Object { [void]$cmbCookiesE.Items.Add($_) }
+    $lblCookies = New-Object System.Windows.Forms.Label; $lblCookies.Text = "or cookies.txt path:"; $lblCookies.Location = [System.Drawing.Point]::new(15,72); $lblCookies.AutoSize = $true; $lblCookies.ForeColor = $t.Text
+    $txtCookies = New-Object System.Windows.Forms.TextBox; $txtCookies.Location = [System.Drawing.Point]::new(150,68); $txtCookies.Size = [System.Drawing.Size]::new(425,26); $txtCookies.BackColor = $t.Entry; $txtCookies.ForeColor = $t.Text
+    # prominent amber banner - the "close the browser" rule must be impossible to miss
+    $lblLoginWarn = New-Object System.Windows.Forms.Label
+    $lblLoginWarn.Text = "Important: close that browser before downloading - yt-dlp cannot read a running browser's cookies."
+    $lblLoginWarn.Location = [System.Drawing.Point]::new(15,102); $lblLoginWarn.Size = [System.Drawing.Size]::new(565,36)
+    $lblLoginWarn.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $lblLoginWarn.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#402b00")
+    $lblLoginWarn.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#ffe08a")
+
     $btnOK = New-Object System.Windows.Forms.Button
     $btnOK.Text = if ($isEdit) { "Save Changes" } else { "Create Profile" }
-    $btnOK.Location = [System.Drawing.Point]::new(210, 480); $btnOK.Size = [System.Drawing.Size]::new(110, 32)
+    $btnOK.Location = [System.Drawing.Point]::new(210, 660); $btnOK.Size = [System.Drawing.Size]::new(110, 32)
     $btnOK.FlatStyle = 'Flat'; $btnOK.FlatAppearance.BorderSize = 0
     Style-Button $btnOK $t.Success (HexToCol "#ffffff") $t.IsDark
     $btnCancelE = New-Object System.Windows.Forms.Button
-    $btnCancelE.Text = "Cancel"; $btnCancelE.Location = [System.Drawing.Point]::new(330, 480); $btnCancelE.Size = [System.Drawing.Size]::new(90, 32)
+    $btnCancelE.Text = "Cancel"; $btnCancelE.Location = [System.Drawing.Point]::new(330, 660); $btnCancelE.Size = [System.Drawing.Size]::new(90, 32)
     $btnCancelE.FlatStyle = 'Flat'; $btnCancelE.FlatAppearance.BorderSize = 0
     Style-Button $btnCancelE $t.BtnGray $t.Text $t.IsDark
     $btnCancelE.DialogResult = 'Cancel'
@@ -1378,12 +1527,21 @@ function Show-ProfileEditor([string]$editName) {
 
     $gb1.Controls.AddRange(@($lblName,$txtName,$lblDesc,$txtDesc))
     $gb2.Controls.AddRange(@($lblFolder,$txtFolder,$btnBrowseE,$lblSub,$cmbSub,$lblSubHint,$chkAsk))
-    $gb3.Controls.AddRange(@($lblFmt,$cmbFormatE,$lblQual,$cmbQualityE,$chkAudioE,$cmbAudioFmtE,$chkSubsE,$lblLang,$cmbLang,$chkThumbE,$chkPlaylistE,$cmbAudioQualityE,$lblItems,$txtItems,$lblRate,$txtRate,$lblCookies,$txtCookies,$lblTpl,$txtTpl,$lblTplHint,$chkVerboseE))
-    $frm.Controls.AddRange(@($gb1, $gb2, $gb3, $btnOK, $btnCancelE))
+    $gb3.Controls.AddRange(@($lblFmt,$cmbFormatE,$lblQual,$cmbQualityE,$chkAudioE,$cmbAudioFmtE,$chkSubsE,$lblLang,$cmbLang,$chkThumbE,$chkPlaylistE,$cmbAudioQualityE,$lblItems,$txtItems,$lblRate,$txtRate,$lblTpl,$txtTpl,$lblTplHint,$chkVerboseE))
+    $gb4.Controls.AddRange(@($lblLoginE,$cmbCookiesE,$lblCookies,$txtCookies,$lblLoginWarn))
+    $frm.Controls.AddRange(@($gb1, $gb2, $gb3, $gb4, $btnOK, $btnCancelE))
     $script:editorForm = $frm
     $script:editorNameBox = $txtName
     $script:editorOkBtn = $btnOK
-    $frm.Add_FormClosed({ try { $script:editorForm = $null; $script:editorNameBox = $null; $script:editorOkBtn = $null } catch { } })
+    $script:editorCookiesBox = $cmbCookiesE
+    $script:editorG4 = $gb4
+    $script:editorG3 = $gb3
+    # proftest hook: every editor field, so the lifecycle test can drive and verify all of them
+    $script:editorMap = @{ Name=$txtName; Desc=$txtDesc; Folder=$txtFolder; Sub=$cmbSub; Ask=$chkAsk
+        Format=$cmbFormatE; Quality=$cmbQualityE; Audio=$chkAudioE; AudioFmt=$cmbAudioFmtE; AudioQ=$cmbAudioQualityE
+        Subs=$chkSubsE; Lang=$cmbLang; Thumb=$chkThumbE; Playlist=$chkPlaylistE; Items=$txtItems
+        Rate=$txtRate; Cookies=$txtCookies; Browser=$cmbCookiesE; Tpl=$txtTpl; Verbose=$chkVerboseE }
+    $frm.Add_FormClosed({ try { $script:editorForm = $null; $script:editorNameBox = $null; $script:editorOkBtn = $null; $script:editorCookiesBox = $null; $script:editorG4 = $null; $script:editorG3 = $null; $script:editorMap = $null } catch { } })
 
     # -- editor helper (defined BEFORE prefill calls it - PowerShell has no hoisting)
     function Update-EditorAudioState {
@@ -1395,7 +1553,7 @@ function Show-ProfileEditor([string]$editName) {
     }
 
     # -- prefill
-    $ed = @{ Name=""; Description=""; Format="mp4"; Quality="Best"; AudioOnly=$false; AudioFormat="mp3"; AudioQuality="Best"; Subs=$false; SubLang="en"; Thumb=$false; Playlist=$false; PlaylistRange=""; Verbose=$true; Folder=$DownloadFolder; Subfolder=""; AskDestination=$false; FilenameTemplate=""; RateLimit=""; CookiesFile="" }
+    $ed = @{ Name=""; Description=""; Format="mp4"; Quality="Best"; AudioOnly=$false; AudioFormat="mp3"; AudioQuality="Best"; Subs=$false; SubLang="en"; Thumb=$false; Playlist=$false; PlaylistRange=""; Verbose=$true; Folder=$DownloadFolder; Subfolder=""; AskDestination=$false; FilenameTemplate=""; RateLimit=""; CookiesFile=""; CookiesBrowser="" }
     if ($src) {
         foreach ($k in @($ed.Keys)) { if ($null -ne $src.$k) { $ed[$k] = $src.$k } }
         if ([string]::IsNullOrWhiteSpace($ed.SubLang)) { $ed.SubLang = "en" }
@@ -1405,7 +1563,7 @@ function Show-ProfileEditor([string]$editName) {
         $ed.Subs = $chkSubs.Checked; $ed.Thumb = $chkThumb.Checked; $ed.Playlist = $chkPlaylist.Checked
         $ed.Verbose = $chkVerbose.Checked; $ed.Folder = $cmbFolder.Text.Trim()
         $ap = Get-ActiveProfile
-        if ($ap) { $ed.SubLang = $ap.SubLang; $ed.AudioFormat = $ap.AudioFormat; $ed.AudioQuality = $ap.AudioQuality; $ed.Subfolder = $ap.Subfolder; $ed.FilenameTemplate = $ap.FilenameTemplate; $ed.RateLimit = $ap.RateLimit; $ed.CookiesFile = $ap.CookiesFile; $ed.PlaylistRange = $ap.PlaylistRange }
+        if ($ap) { $ed.SubLang = $ap.SubLang; $ed.AudioFormat = $ap.AudioFormat; $ed.AudioQuality = $ap.AudioQuality; $ed.Subfolder = $ap.Subfolder; $ed.FilenameTemplate = $ap.FilenameTemplate; $ed.RateLimit = $ap.RateLimit; $ed.CookiesFile = $ap.CookiesFile; $ed.CookiesBrowser = $ap.CookiesBrowser; $ed.PlaylistRange = $ap.PlaylistRange }
     }
     $txtName.Text = $ed.Name; $txtDesc.Text = $ed.Description
     $txtFolder.Text = $ed.Folder
@@ -1420,6 +1578,12 @@ function Show-ProfileEditor([string]$editName) {
     $chkSubsE.Checked = $ed.Subs; $cmbLang.Text = $ed.SubLang
     $chkThumbE.Checked = $ed.Thumb; $chkPlaylistE.Checked = $ed.Playlist
     $txtItems.Text = $ed.PlaylistRange; $txtRate.Text = $ed.RateLimit; $txtCookies.Text = $ed.CookiesFile
+    # browser cookies: combo shows "Brave" etc, profile stores the lowercase yt-dlp name ("brave")
+    $want = ([string]$ed.CookiesBrowser).Trim().ToLower()
+    $cbIdx = -1
+    for ($ci = 0; $ci -lt $cmbCookiesE.Items.Count; $ci++) { if (($cmbCookiesE.Items[$ci].ToString().ToLower()) -eq $want) { $cbIdx = $ci; break } }
+    if ($cbIdx -lt 0) { $cbIdx = 0 }  # None
+    $cmbCookiesE.SelectedIndex = $cbIdx
     $txtTpl.Text = $ed.FilenameTemplate; $chkVerboseE.Checked = $ed.Verbose
 
     # -- editor wiring
@@ -1432,6 +1596,7 @@ function Show-ProfileEditor([string]$editName) {
     $tooltip.SetToolTip($cmbLang, "Subtitle language code(s), e.g. en, el or en,el")
     $tooltip.SetToolTip($cmbAudioFmtE, "Audio format for audio-only downloads")
     $tooltip.SetToolTip($chkVerboseE, "Show the full yt-dlp output in the log")
+    $tooltip.SetToolTip($cmbCookiesE, "Use the login cookies of the chosen browser (Brave, Chrome, Edge or Firefox) - for X/Twitter, age-restricted or members-only videos. Close that browser first: yt-dlp cannot read the cookies of a running browser.")
     $chkAudioE.Add_CheckedChanged({ Update-EditorAudioState })
     $btnBrowseE.Add_Click({
         $fbd = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -1457,6 +1622,7 @@ function Show-ProfileEditor([string]$editName) {
             Subfolder = ($cmbSub.Text -replace '\s*\(.*$','').Trim()
             AskDestination = $chkAsk.Checked
             FilenameTemplate = $txtTpl.Text.Trim(); RateLimit = $txtRate.Text.Trim(); CookiesFile = $txtCookies.Text.Trim()
+            CookiesBrowser = $(if ($cmbCookiesE.SelectedIndex -gt 0) { $cmbCookiesE.Text.Trim().ToLower() } else { "" })
             Created = $(if ($isEdit -and $src) { $src.Created } else { (Get-Date -Format "yyyy-MM-dd") })
             LastUsed = $(if ($isEdit -and $src) { $src.LastUsed } else { $null })
         }
@@ -1518,6 +1684,11 @@ function Show-ProfileManager {
     $btnExpAll = New-ProButton "Export all"  330 400 100 30
     $btnImport = New-ProButton "Import…"     440 400 90 30
     $btnTrash  = New-ProButton "Trash…"      540 400 90 30
+    # proftest hooks (NVD_PROFTEST=1) so the lifecycle test can drive the manager
+    $script:managerBtnNew = $btnNew; $script:managerBtnEdit = $btnEdit; $script:managerBtnRename = $btnRename
+    $script:managerBtnDup = $btnDup; $script:managerBtnSetDef = $btnSetDef; $script:managerBtnUp = $btnUp
+    $script:managerBtnDown = $btnDown; $script:managerBtnExport = $btnExport; $script:managerBtnExpAll = $btnExpAll
+    $script:managerBtnImport = $btnImport; $script:managerBtnTrash = $btnTrash; $script:managerBtnClose = $btnClose
 
     $frm.Controls.AddRange(@($lblHint, $lv, $btnNew, $btnEdit, $btnRename, $btnDup, $btnDel, $btnSetDef, $btnClose, $btnUp, $btnDown, $btnExport, $btnExpAll, $btnImport, $btnTrash))
     foreach ($b in @($btnNew,$btnEdit,$btnRename,$btnDup,$btnSetDef,$btnUp,$btnDown,$btnExport,$btnExpAll,$btnImport)) { Style-Button $b $t.BtnGray $t.Text $t.IsDark }
@@ -1629,7 +1800,7 @@ function Show-ProfileManager {
             $p = Get-SelectedProfile
             if (-not $p) { return }
             if ($cfg.Profiles.Count -le 1) { [System.Windows.Forms.MessageBox]::Show("Cannot delete the last remaining profile.","Protected",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null; return }
-            $yes = ($env:NVD_SELFTEST -eq "1")
+            $yes = ($env:NVD_SELFTEST -eq "1" -or $env:NVD_PROFTEST -eq "1")
             if (-not $yes) { $yes = ([System.Windows.Forms.MessageBox]::Show("Delete profile '$($p.Name)'?`nIt will be kept in the Trash and can be restored.","Confirm Delete",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question) -eq 'Yes') }
             if ($yes) {
                 $cfg.Profiles = @($cfg.Profiles | Where-Object { $_.Name -ne $p.Name })
@@ -1658,32 +1829,50 @@ function Show-ProfileManager {
     $btnExport.Add_Click({
         $p = Get-SelectedProfile
         if (-not $p) { return }
-        $sfd = New-Object System.Windows.Forms.SaveFileDialog
-        $sfd.Filter = "Profile JSON (*.json)|*.json"
-        $sfd.FileName = $p.Name + ".json"
-        if ($sfd.ShowDialog() -eq 'OK') {
+        # proftest: drive the real export logic without the OS SaveFileDialog
+        $target = $null
+        if ($env:NVD_PROFTEST -eq "1") { $target = Join-Path $env:TEMP "nvd-proftest-single.json" }
+        else {
+            $sfd = New-Object System.Windows.Forms.SaveFileDialog
+            $sfd.Filter = "Profile JSON (*.json)|*.json"
+            $sfd.FileName = $p.Name + ".json"
+            if ($sfd.ShowDialog() -eq 'OK') { $target = $sfd.FileName }
+        }
+        if ($target) {
             try {
-                $p | ConvertTo-Json -Depth 4 | Set-Content $sfd.FileName -Encoding UTF8 -Force
-                [System.Windows.Forms.MessageBox]::Show("Profile exported to:`n$($sfd.FileName)","Export OK",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                $p | ConvertTo-Json -Depth 4 | Set-Content $target -Encoding UTF8 -Force
+                if ($env:NVD_PROFTEST -ne "1") { [System.Windows.Forms.MessageBox]::Show("Profile exported to:`n$target","Export OK",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null }
             } catch { [System.Windows.Forms.MessageBox]::Show("Export failed: $($_.Exception.Message)","Export Error",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null }
         }
     })
     $btnExpAll.Add_Click({
-        $sfd = New-Object System.Windows.Forms.SaveFileDialog
-        $sfd.Filter = "Profile JSON (*.json)|*.json"; $sfd.FileName = "profiles.json"
-        if ($sfd.ShowDialog() -eq 'OK') {
+        # proftest: drive the real export-all logic without the OS SaveFileDialog
+        $target = $null
+        if ($env:NVD_PROFTEST -eq "1") { $target = Join-Path $env:TEMP "nvd-proftest-all.json" }
+        else {
+            $sfd = New-Object System.Windows.Forms.SaveFileDialog
+            $sfd.Filter = "Profile JSON (*.json)|*.json"; $sfd.FileName = "profiles.json"
+            if ($sfd.ShowDialog() -eq 'OK') { $target = $sfd.FileName }
+        }
+        if ($target) {
             try {
-                @{ Profiles = @($cfg.Profiles) } | ConvertTo-Json -Depth 4 | Set-Content $sfd.FileName -Encoding UTF8 -Force
-                [System.Windows.Forms.MessageBox]::Show("All $($cfg.Profiles.Count) profiles exported to:`n$($sfd.FileName)","Export OK",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                @{ Profiles = @($cfg.Profiles) } | ConvertTo-Json -Depth 4 | Set-Content $target -Encoding UTF8 -Force
+                if ($env:NVD_PROFTEST -ne "1") { [System.Windows.Forms.MessageBox]::Show("All $($cfg.Profiles.Count) profiles exported to:`n$target","Export OK",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null }
             } catch { [System.Windows.Forms.MessageBox]::Show("Export failed: $($_.Exception.Message)","Export Error",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null }
         }
     })
     $btnImport.Add_Click({
-        $ofd = New-Object System.Windows.Forms.OpenFileDialog
-        $ofd.Filter = "Profile JSON (*.json)|*.json"; $ofd.Multiselect = $true
-        if ($ofd.ShowDialog() -eq 'OK') {
+        # proftest: drive the real import logic without the OS OpenFileDialog
+        $files = $null
+        if ($env:NVD_PROFTEST -eq "1") { $files = @(Join-Path $env:TEMP "nvd-proftest-single.json") }
+        else {
+            $ofd = New-Object System.Windows.Forms.OpenFileDialog
+            $ofd.Filter = "Profile JSON (*.json)|*.json"; $ofd.Multiselect = $true
+            if ($ofd.ShowDialog() -eq 'OK') { $files = @($ofd.FileNames) }
+        }
+        if ($files) {
             $imported = 0; $skipped = 0
-            foreach ($f in $ofd.FileNames) {
+            foreach ($f in $files) {
                 try {
                     $j = Get-Content $f -Raw | ConvertFrom-Json
                     $arr = if ($null -ne $j.Profiles) { @($j.Profiles) } else { @($j) }
@@ -1691,7 +1880,9 @@ function Show-ProfileManager {
                         $p = Normalize-Profile $p
                         if (-not $p.Name) { $skipped++; continue }
                         if ($cfg.Profiles | Where-Object { $_.Name -eq $p.Name }) {
-                            if ([System.Windows.Forms.MessageBox]::Show("A profile named '$($p.Name)' already exists. Overwrite it?","Import conflict",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question) -ne 'Yes') { $skipped++; continue }
+                            $overwrite = ($env:NVD_PROFTEST -eq "1")
+                            if (-not $overwrite) { $overwrite = ([System.Windows.Forms.MessageBox]::Show("A profile named '$($p.Name)' already exists. Overwrite it?","Import conflict",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Question) -eq 'Yes') }
+                            if (-not $overwrite) { $skipped++; continue }
                             $names = @($cfg.Profiles | ForEach-Object { $_.Name })
                             $idx = [Array]::IndexOf($names, $p.Name)
                             if ($idx -ge 0) { $cfg.Profiles[$idx] = $p }
@@ -1706,54 +1897,100 @@ function Show-ProfileManager {
     })
     $btnTrash.Add_Click({
         if (@($cfg.Trash).Count -eq 0) { [System.Windows.Forms.MessageBox]::Show("The trash is empty. Deleted profiles are kept here (last 5) and can be restored.","Trash",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null; return }
-        $tfrm = New-Object System.Windows.Forms.Form
-        $tfrm.Text = "Trash - deleted profiles"; $tfrm.Size = [System.Drawing.Size]::new(500, 360)
-        $tfrm.StartPosition = 'CenterParent'; $tfrm.FormBorderStyle = 'FixedDialog'
-        $tfrm.MaximizeBox = $false; $tfrm.MinimizeBox = $false
-        $tfrm.BackColor = $t.Bg; $tfrm.ForeColor = $t.Text
-        if (Test-Path $IconPath) { try { $tfrm.Icon = New-Object System.Drawing.Icon($IconPath) } catch { } }
-        $lst = New-Object System.Windows.Forms.ListBox
-        $lst.Location = [System.Drawing.Point]::new(15,15); $lst.Size = [System.Drawing.Size]::new(455,210)
-        $lst.BackColor = $t.Entry; $lst.ForeColor = $t.Text
-        foreach ($tp in @($cfg.Trash)) { [void]$lst.Items.Add("$($tp.Name)   (deleted $($tp.DeletedAt))") }
-        $btnRestore = New-ProButton "Restore"       15 240 90 30
-        $btnPurge   = New-ProButton "Delete forever" 115 240 130 30
-        $btnCloseT  = New-ProButton "Close"         255 240 80 30
-        Style-Button $btnRestore $t.Success (HexToCol "#ffffff") $t.IsDark
-        Style-Button $btnPurge   $t.Danger  (HexToCol "#ffffff") $t.IsDark
-        Style-Button $btnCloseT  $t.BtnGray $t.Text $t.IsDark
-        $tooltip.SetToolTip($btnRestore, "Move the selected profile back into the list")
-        $tooltip.SetToolTip($btnPurge,   "Permanently delete - cannot be undone")
-        $tooltip.SetToolTip($btnCloseT,  "Close the trash")
-        $tfrm.Controls.AddRange(@($lst, $btnRestore, $btnPurge, $btnCloseT))
-        $btnRestore.Add_Click({
+        Show-TrashDialog
+    })
+
+    $lv.Add_DoubleClick({ if ($lv.SelectedItems.Count) { $btnEdit.PerformClick() } })
+    $frm.Add_FormClosed({
+        Refresh-ProfileCombo; Save-Settings $form $cfg
+        $script:managerForm = $null
+        $script:managerBtnNew = $null; $script:managerBtnEdit = $null; $script:managerBtnRename = $null; $script:managerBtnDup = $null; $script:managerBtnSetDef = $null; $script:managerBtnUp = $null; $script:managerBtnDown = $null; $script:managerBtnExport = $null; $script:managerBtnExpAll = $null; $script:managerBtnImport = $null; $script:managerBtnTrash = $null; $script:managerBtnClose = $null
+    })
+    function Select-ManagerItemByName($name) {
+        for ($i = 0; $i -lt $lv.Items.Count; $i++) {
+            if (($lv.Items[$i].Text -replace '^★\s*','') -eq $name) {
+                $lv.Items[$i].Selected = $true; $lv.Items[$i].Focused = $true; $lv.EnsureVisible($i)
+                return $true
+            }
+        }
+        return $false
+    }
+    Refresh-ManagerList
+    [void]$frm.ShowDialog()
+}
+
+# TRASH DIALOG - standalone so it can be shown from the manager button or the
+# profile-lifecycle test without nesting two modal dialogs.
+function Show-TrashDialog {
+    $t = Get-ThemePalette $cfg.Theme
+    if (@($cfg.Trash).Count -eq 0) { [System.Windows.Forms.MessageBox]::Show("The trash is empty. Deleted profiles are kept here (last 5) and can be restored.","Trash",[System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null; return }
+    $tfrm = New-Object System.Windows.Forms.Form
+    $tfrm.Text = "Trash - deleted profiles"; $tfrm.Size = [System.Drawing.Size]::new(500, 360)
+    $tfrm.StartPosition = 'CenterParent'; $tfrm.FormBorderStyle = 'FixedDialog'
+    $tfrm.MaximizeBox = $false; $tfrm.MinimizeBox = $false
+    $tfrm.BackColor = $t.Bg; $tfrm.ForeColor = $t.Text
+    if (Test-Path $IconPath) { try { $tfrm.Icon = New-Object System.Drawing.Icon($IconPath) } catch { } }
+    $lst = New-Object System.Windows.Forms.ListBox
+    $lst.Location = [System.Drawing.Point]::new(15,15); $lst.Size = [System.Drawing.Size]::new(455,210)
+    $lst.BackColor = $t.Entry; $lst.ForeColor = $t.Text
+    foreach ($tp in @($cfg.Trash)) { [void]$lst.Items.Add("$($tp.Name)   (deleted $($tp.DeletedAt))") }
+    $btnRestore = New-ProButton "Restore"       15 240 90 30
+    $btnPurge   = New-ProButton "Delete forever" 115 240 130 30
+    $btnCloseT  = New-ProButton "Close"         255 240 80 30
+    Style-Button $btnRestore $t.Success (HexToCol "#ffffff") $t.IsDark
+    Style-Button $btnPurge   $t.Danger  (HexToCol "#ffffff") $t.IsDark
+    Style-Button $btnCloseT  $t.BtnGray $t.Text $t.IsDark
+    $tooltip.SetToolTip($btnRestore, "Move the selected profile back into the list")
+    $tooltip.SetToolTip($btnPurge,   "Permanently delete - cannot be undone")
+    $tooltip.SetToolTip($btnCloseT,  "Close the trash")
+    $tfrm.Controls.AddRange(@($lst, $btnRestore, $btnPurge, $btnCloseT))
+    $script:trashForm = $tfrm; $script:trashList = $lst; $script:trashBtnRestore = $btnRestore; $script:trashBtnPurge = $btnPurge; $script:trashBtnClose = $btnCloseT
+    $tfrm.Add_FormClosed({ try { $script:trashForm = $null; $script:trashList = $null; $script:trashBtnRestore = $null; $script:trashBtnPurge = $null; $script:trashBtnClose = $null } catch { } })
+    $btnRestore.Add_Click({
+        try {
             if ($lst.SelectedIndex -lt 0) { return }
             $tp = @($cfg.Trash)[$lst.SelectedIndex]
             if ($cfg.Profiles | Where-Object { $_.Name -eq $tp.Name }) { $tp.Name = $tp.Name + " (restored)" }
             $cfg.Profiles += $tp
             $cfg.Trash = @($cfg.Trash | Where-Object { $_ -ne $tp })
+            # if the manager is open behind this dialog, keep its list fresh
+            if ($script:managerLv) {
+                $lv = $script:managerLv
+                $lv.BeginUpdate(); $lv.Items.Clear()
+                foreach ($p2 in $cfg.Profiles) {
+                    $isDef = ($p2.Name -eq $cfg.DefaultProfile)
+                    $item = New-Object System.Windows.Forms.ListViewItem(($(if ($isDef) { "★ " } else { "" }) + $p2.Name))
+                    [void]$item.SubItems.Add($p2.Format)
+                    [void]$item.SubItems.Add($(if ($p2.AudioOnly) { "Audio" } else { $p2.Quality }))
+                    [void]$item.SubItems.Add($(if ($p2.AudioOnly) { "Yes" } else { "No" }))
+                    [void]$item.SubItems.Add($(if ($p2.Subs) { "Yes" } else { "No" }))
+                    [void]$item.SubItems.Add($(if ($p2.Thumb) { "Yes" } else { "No" }))
+                    [void]$item.SubItems.Add($(if ($p2.Playlist) { "Yes" } else { "No" }))
+                    [void]$item.SubItems.Add($p2.Folder)
+                    [void]$lv.Items.Add($item)
+                }
+                $lv.EndUpdate()
+            }
             [void]$tfrm.Close()
-            Refresh-ManagerList
             Log "Profile restored from trash: $($tp.Name)" "Lime"
-        })
-        $btnPurge.Add_Click({
+        } catch { }
+    })
+    $btnPurge.Add_Click({
+        try {
             if ($lst.SelectedIndex -lt 0) { return }
-            if ([System.Windows.Forms.MessageBox]::Show("Permanently delete '$(@($cfg.Trash)[$lst.SelectedIndex].Name)'? This cannot be undone.","Delete forever",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -eq 'Yes') {
+            $yes = ($env:NVD_PROFTEST -eq "1")
+            if (-not $yes) { $yes = ([System.Windows.Forms.MessageBox]::Show("Permanently delete '$(@($cfg.Trash)[$lst.SelectedIndex].Name)'? This cannot be undone.","Delete forever",[System.Windows.Forms.MessageBoxButtons]::YesNo,[System.Windows.Forms.MessageBoxIcon]::Warning) -eq 'Yes') }
+            if ($yes) {
                 $tp = @($cfg.Trash)[$lst.SelectedIndex]
                 $cfg.Trash = @($cfg.Trash | Where-Object { $_ -ne $tp })
                 $lst.Items.RemoveAt($lst.SelectedIndex)
                 Log "Profile permanently deleted: $($tp.Name)" "Yellow"
             }
-        })
-        $btnCloseT.Add_Click({ $tfrm.Close() })
-        $tfrm.CancelButton = $btnCloseT
-        [void]$tfrm.ShowDialog()
+        } catch { }
     })
-
-    $lv.Add_DoubleClick({ if ($lv.SelectedItems.Count) { $btnEdit.PerformClick() } })
-    $frm.Add_FormClosed({ Refresh-ProfileCombo; Save-Settings $form $cfg; $script:managerForm = $null })
-    Refresh-ManagerList
-    [void]$frm.ShowDialog()
+    $btnCloseT.Add_Click({ $tfrm.Close() })
+    $tfrm.CancelButton = $btnCloseT
+    [void]$tfrm.ShowDialog()
 }
 
 # -- EVENT WIRING (PROFILES & UI) ------------------------------------------
@@ -2056,7 +2293,43 @@ function Flash-MainWindow {
     } catch { }
 }
 
-function Show-NotifPopup($title, $msg) {
+# Fade the popup out instead of an instant vanish (used by the X button and by
+# the auto-close timer so the dismissal always looks the same).
+function Close-NotifPopupAnimated {
+    try {
+        if (-not $script:notifPopup) { return }
+        # never run two fade loops at once
+        if ($script:notifCloseTimer) { return }
+        if ($script:notifPopTimer) { try { $script:notifPopTimer.Stop(); $script:notifPopTimer.Dispose() } catch { }; $script:notifPopTimer = $null }
+        try { $script:notifPopup.Opacity = 1.0 } catch { }
+        $script:notifCloseTimer = New-Object System.Windows.Forms.Timer
+        $script:notifCloseTimer.Interval = 24
+        $script:notifCloseTimer.Add_Tick({
+            try {
+                if (-not $script:notifPopup) {
+                    $script:notifCloseTimer.Stop(); $script:notifCloseTimer.Dispose(); $script:notifCloseTimer = $null
+                    return
+                }
+                $o = 0.0
+                try { $o = $script:notifPopup.Opacity } catch { }
+                if ($o -gt 0.12) {
+                    try { $script:notifPopup.Opacity = $o - 0.12 } catch { }
+                } else {
+                    $script:notifCloseTimer.Stop(); $script:notifCloseTimer.Dispose(); $script:notifCloseTimer = $null
+                    try { $script:notifPopup.Close() } catch { }
+                }
+            } catch {
+                try { $script:notifCloseTimer.Stop(); $script:notifCloseTimer.Dispose(); $script:notifCloseTimer = $null } catch { }
+                try { if ($script:notifPopup) { $script:notifPopup.Close() } } catch { }
+            }
+        })
+        $script:notifCloseTimer.Start()
+    } catch {
+        try { if ($script:notifPopup) { $script:notifPopup.Close() } } catch { }
+    }
+}
+
+function Show-NotifPopup($title, $msg, [bool]$ok = $true, [string]$failUrl = "") {
     try {
         $t = Get-ThemePalette $cfg.Theme
         $pop = if ($script:hasNoActivate) { New-Object NoActivateForm } else { New-Object System.Windows.Forms.Form }
@@ -2065,44 +2338,109 @@ function Show-NotifPopup($title, $msg) {
         # cleans the local scope up; the later tick then sees $null -> crash)
         $script:notifPopup = $pop
         $pop.FormBorderStyle = 'None'; $pop.StartPosition = 'Manual'; $pop.ShowInTaskbar = $false; $pop.TopMost = $true
-        $pop.Size = [System.Drawing.Size]::new(400, 128)
+        $pop.Size = [System.Drawing.Size]::new(420, $(if ($ok) { 126 } else { 148 }))
         $pop.BackColor = $t.Panel; $pop.ForeColor = $t.Text
+        # close (X) button - fades the popup away
+        $btnX = New-Object System.Windows.Forms.Button
+        $btnX.Text = "✕"; $btnX.Font = $fBold
+        $btnX.FlatStyle = 'Flat'; $btnX.FlatAppearance.BorderSize = 0
+        $btnX.BackColor = $t.Panel; $btnX.ForeColor = $t.Sub
+        $btnX.Size = [System.Drawing.Size]::new(26, 26)
+        $btnX.Location = [System.Drawing.Point]::new(420 - 32, 4)
+        $btnX.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $btnX.TabStop = $false
+        $script:notifXBtn = $btnX
+        $script:notifXColor = $t.Sub; $script:notifXHover = $t.Danger
+        $btnX.Add_Click({ try { Close-NotifPopupAnimated } catch { } })
+        $btnX.Add_MouseEnter({ try { if ($script:notifXBtn) { $script:notifXBtn.ForeColor = $script:notifXHover } } catch { } })
+        $btnX.Add_MouseLeave({ try { if ($script:notifXBtn) { $script:notifXBtn.ForeColor = $script:notifXColor } } catch { } })
+        # outcome-aware coloring: success uses the accent, failure uses danger
+        $titleCol = $(if ($ok) { $t.Success } else { $t.Danger })
         $lblT = New-Object System.Windows.Forms.Label
-        $lblT.Text = $title; $lblT.Font = $fBold; $lblT.ForeColor = $t.Accent
+        $lblT.Text = $title; $lblT.Font = $fBold; $lblT.ForeColor = $titleCol
         $lblT.Location = [System.Drawing.Point]::new(14, 10); $lblT.AutoSize = $true
+        # failure: compose a clear message - the summary + the first yt-dlp error
+        $body = $msg
+        if (-not $ok) {
+            if ([string]::IsNullOrWhiteSpace($body) -or $body -eq "Check the log for details.") { $body = "The download did not complete." }
+            if ($script:lastDlError) {
+                $reason = $script:lastDlError
+                if ($reason.Length -gt 240) { $reason = $reason.Substring(0, 240) + "..." }
+                $body = $body + "`n`nReason: " + $reason
+            }
+        }
         $lblM = New-Object System.Windows.Forms.Label
-        $lblM.Text = $msg; $lblM.Font = $fNormal; $lblM.ForeColor = $t.Sub
-        $lblM.Location = [System.Drawing.Point]::new(14, 36); $lblM.Size = [System.Drawing.Size]::new(372, 44); $lblM.AutoEllipsis = $true
-        $lnkFolder = New-Object System.Windows.Forms.LinkLabel
-        $lnkFolder.Text = "Open folder"; $lnkFolder.LinkColor = $t.Accent; $lnkFolder.ActiveLinkColor = $t.Accent; $lnkFolder.VisitedLinkColor = $t.Accent
-        $lnkFolder.Location = [System.Drawing.Point]::new(14, 92); $lnkFolder.AutoSize = $true
-        $lnkFolder.Add_LinkClicked({
-            try { $targetDir = Get-ActiveFolder; if (Test-Path $targetDir) { Start-Process $targetDir } } catch { }
-            try { if ($script:notifPopup) { $script:notifPopup.Close() } } catch { }
-        })
+        $lblM.Text = $body; $lblM.Font = $fNormal; $lblM.ForeColor = $t.Sub
+        $lblM.Location = [System.Drawing.Point]::new(14, 36)
+        $lblM.Size = [System.Drawing.Size]::new(392, $(if ($ok) { 44 } else { 66 }))
+        $lblM.AutoEllipsis = $true
+        $links = New-Object System.Collections.Generic.List[object]
+        $linkX = 14
+        if ($ok) {
+            # success: the file exists - offer the folder and the window
+            $lnkFolder = New-Object System.Windows.Forms.LinkLabel
+            $lnkFolder.Text = "Open folder"; $lnkFolder.LinkColor = $t.Accent; $lnkFolder.ActiveLinkColor = $t.Accent; $lnkFolder.VisitedLinkColor = $t.Accent
+            $lnkFolder.Location = [System.Drawing.Point]::new($linkX, 96); $lnkFolder.AutoSize = $true
+            $lnkFolder.Add_LinkClicked({
+                try { $targetDir = Get-ActiveFolder; if (Test-Path $targetDir) { Start-Process $targetDir } } catch { }
+                try { Close-NotifPopupAnimated } catch { }
+            })
+            $links.Add($lnkFolder); $linkX += 90
+        } else {
+            # failure: no file to open - offer retry (single URL only), log, window
+            $script:notifFailUrl = $failUrl
+            if (-not [string]::IsNullOrWhiteSpace($failUrl)) {
+                $lnkRetry = New-Object System.Windows.Forms.LinkLabel
+                $lnkRetry.Text = "Retry"; $lnkRetry.LinkColor = $t.Danger; $lnkRetry.ActiveLinkColor = $t.Danger; $lnkRetry.VisitedLinkColor = $t.Danger
+                $lnkRetry.Location = [System.Drawing.Point]::new($linkX, 118); $lnkRetry.AutoSize = $true
+                $lnkRetry.Add_LinkClicked({
+                    try { Close-NotifPopupAnimated } catch { }
+                    try {
+                        if ($script:notifFailUrl) { Show-MainWindow; $txtUrl.Text = $script:notifFailUrl; $script:notifFailUrl = ""; Start-SingleDownload }
+                    } catch { }
+                })
+                $links.Add($lnkRetry); $linkX += 60
+            }
+            $lnkLog = New-Object System.Windows.Forms.LinkLabel
+            $lnkLog.Text = "View log"; $lnkLog.LinkColor = $t.Accent; $lnkLog.ActiveLinkColor = $t.Accent; $lnkLog.VisitedLinkColor = $t.Accent
+            $lnkLog.Location = [System.Drawing.Point]::new($linkX, 118); $lnkLog.AutoSize = $true
+            $lnkLog.Add_LinkClicked({
+                try { if (Test-Path $script:logFile) { Start-Process $script:logFile } } catch { }
+                try { Close-NotifPopupAnimated } catch { }
+            })
+            $links.Add($lnkLog); $linkX += 80
+        }
         $lnkShow = New-Object System.Windows.Forms.LinkLabel
         $lnkShow.Text = "Show window"; $lnkShow.LinkColor = $t.Accent; $lnkShow.ActiveLinkColor = $t.Accent; $lnkShow.VisitedLinkColor = $t.Accent
-        $lnkShow.Location = [System.Drawing.Point]::new(110, 92); $lnkShow.AutoSize = $true
+        $lnkShow.Location = [System.Drawing.Point]::new($linkX, $(if ($ok) { 96 } else { 118 })); $lnkShow.AutoSize = $true
         $lnkShow.Add_LinkClicked({
             try { Show-MainWindow } catch { }
-            try { if ($script:notifPopup) { $script:notifPopup.Close() } } catch { }
+            try { Close-NotifPopupAnimated } catch { }
         })
-        $pop.Controls.AddRange(@($lblT, $lblM, $lnkFolder, $lnkShow))
+        $links.Add($lnkShow)
+        $allCtl = New-Object System.Collections.Generic.List[System.Windows.Forms.Control]
+        $allCtl.Add($btnX); $allCtl.Add($lblT); $allCtl.Add($lblM); foreach ($l in $links) { $allCtl.Add($l) }
+        $pop.Controls.AddRange($allCtl.ToArray())
         $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
         $pop.Location = [System.Drawing.Point]::new($wa.Right - $pop.Width - 14, $wa.Bottom - $pop.Height - 14)
-        if ($script:notifPopTimer) { try { $script:notifPopTimer.Stop(); $script:notifPopTimer.Dispose() } catch { } }
-        $script:notifPopTimer = New-Object System.Windows.Forms.Timer
-        $script:notifPopTimer.Interval = 6000
-        $script:notifPopTimer.Add_Tick({
-            try {
-                $script:notifPopTimer.Stop(); $script:notifPopTimer.Dispose(); $script:notifPopTimer = $null
-                if ($script:notifPopup) { $script:notifPopup.Close() }
-            } catch { }
-        })
-        $script:notifPopTimer.Start()
+        if ($script:notifPopTimer) { try { $script:notifPopTimer.Stop(); $script:notifPopTimer.Dispose() } catch { }; $script:notifPopTimer = $null }
+        # success popups fade away on their own; failures stay until the user
+        # acts (retry / view log / show window) so the error is never missed
+        if ($ok) {
+            $script:notifPopTimer = New-Object System.Windows.Forms.Timer
+            $script:notifPopTimer.Interval = 6000
+            $script:notifPopTimer.Add_Tick({
+                try {
+                    $script:notifPopTimer.Stop(); $script:notifPopTimer.Dispose(); $script:notifPopTimer = $null
+                    Close-NotifPopupAnimated
+                } catch { }
+            })
+            $script:notifPopTimer.Start()
+        }
         $pop.Add_FormClosed({
             try { if ($script:notifPopTimer) { $script:notifPopTimer.Stop(); $script:notifPopTimer.Dispose(); $script:notifPopTimer = $null } } catch { }
-            try { $script:notifPopup = $null } catch { }
+            try { if ($script:notifCloseTimer) { $script:notifCloseTimer.Stop(); $script:notifCloseTimer.Dispose(); $script:notifCloseTimer = $null } } catch { }
+            try { $script:notifPopup = $null; $script:notifFailUrl = ""; $script:notifXBtn = $null; $script:notifXColor = $null; $script:notifXHover = $null } catch { }
         })
         $pop.Show()
     } catch {
@@ -2110,13 +2448,13 @@ function Show-NotifPopup($title, $msg) {
     }
 }
 
-function Notify-Completed([bool]$ok, $summary) {
+function Notify-Completed([bool]$ok, $summary, [string]$failUrl = "") {
     if ($cfg.NotifyStyle -eq 0) { return }
     if ($cfg.NotifyStyle -ge 3) {
         try { if ($ok) { [System.Media.SystemSounds]::Asterisk.Play() } else { [System.Media.SystemSounds]::Exclamation.Play() } } catch { }
     }
     if ($cfg.NotifyStyle -ge 2) {
-        Show-NotifPopup ($(if ($ok) { "Download complete" } else { "Download failed" })) $summary
+        Show-NotifPopup ($(if ($ok) { "Download complete" } else { "Download failed" })) $summary $ok $failUrl
     } else {
         # in-app only: flash the taskbar + status
         Flash-MainWindow
@@ -2167,7 +2505,7 @@ $form.Add_Resize({
     }
 })
 
-Write-SessionLog "--- Now Video Down v2.40 started ---"
+Write-SessionLog "--- Now Video Down v2.42 started ---"
 
 # -- SELF-TEST HOOK (only when NVD_SELFTEST=1) -----------------------------
 # Reproduces the minimize→tray→restore cycle in-process and writes the
@@ -2255,11 +2593,52 @@ if ($env:NVD_SELFTEST -eq "1") {
                 $shotW.Start()
                 Show-FirstRunWizard
             }
+            # wizard theme-preview regression (NVD_WIZTEST=1): pick "Cyberpunk
+            # Neon" (dark) and "Forest Canopy" (light) - the wizard must recolor
+            # itself live on selection change, not only after OK
+            if ($env:NVD_WIZTEST -eq "1") {
+                $wtT = New-Object System.Windows.Forms.Timer
+                $wtT.Interval = 1200
+                $wtT.Add_Tick({
+                    $wtT.Stop(); $wtT.Dispose()
+                    try {
+                        if ($script:wizardThemeBox) { $script:wizardThemeBox.SelectedItem = "Cyberpunk Neon" }
+                        for ($di = 0; $di -lt 15; $di++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 40 }
+                        if ($script:wizardForm) { Save-WindowShot $script:wizardForm (Join-Path $env:TEMP "nvd-wiz-dark.png") }
+                        if ($script:wizardThemeBox) { $script:wizardThemeBox.SelectedItem = "Forest Canopy" }
+                        for ($di = 0; $di -lt 15; $di++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 40 }
+                        if ($script:wizardForm) { Save-WindowShot $script:wizardForm (Join-Path $env:TEMP "nvd-wiz-light.png") }
+                        StLog ("wizardThemePreview: combo='{0}'" -f $(if ($script:wizardThemeBox) { $script:wizardThemeBox.Text } else { 'NULL' }))
+                        if ($script:wizardForm) { $script:wizardForm.Close() }
+                    } catch { StLog "wizard theme test error: $($_.Exception.Message)" }
+                })
+                $wtT.Start()
+                Show-FirstRunWizard
+            }
             StLog "shots: captured"
             # editor regression: New Profile must open and close without crashing
             $edT = New-Object System.Windows.Forms.Timer
             $edT.Interval = 1000
-            $edT.Add_Tick({ $edT.Stop(); $edT.Dispose(); try { if ($script:editorForm) { $script:editorForm.Close() } } catch { } })
+            $edT.Add_Tick({ $edT.Stop(); $edT.Dispose(); try {
+                if ($script:editorForm) {
+                    $ef = $script:editorForm
+                    $issues = @()
+                    foreach ($grp in @($script:editorG3, $script:editorG4)) {
+                        if (-not $grp) { continue }
+                        foreach ($ctl in $grp.Controls) {
+                            $abs = $grp.RectangleToScreen($ctl.Bounds)
+                            $cvt = $ef.RectangleToClient($abs)
+                            if ($cvt.Right -gt $ef.ClientSize.Width -or $cvt.Bottom -gt $ef.ClientSize.Height -or $cvt.X -lt 0 -or $cvt.Y -lt 0) {
+                                $issues += ("{0}.{1} {2},{3} {4}x{5} OUTSIDE" -f $grp.Text, $ctl.GetType().Name, $cvt.X, $cvt.Y, $cvt.Width, $cvt.Height)
+                            }
+                        }
+                    }
+                    StLog ("editorLayout: client={0}x{1} issues={2}" -f $ef.ClientSize.Width, $ef.ClientSize.Height, $issues.Count)
+                    $issues | Select-Object -First 6 | ForEach-Object { StLog ("  " + $_) }
+                    if ($env:NVD_EDITORSHOT -eq "1") { for ($di = 0; $di -lt 30; $di++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 60 }; Save-WindowShot $script:editorForm (Join-Path $env:TEMP "nvd-editor-layout.png") }
+                    $script:editorForm.Close()
+                }
+            } catch { StLog ("editorLayout error: " + $_.Exception.Message) } })
             $edT.Start()
             Show-ProfileEditor $null
             StLog "afterEditor: ok"
@@ -2274,6 +2653,8 @@ if ($env:NVD_SELFTEST -eq "1") {
                     $edR1.Stop(); $edR1.Dispose()
                     try {
                         if ($script:editorNameBox) { $script:editorNameBox.Text = $script:editTestNew }
+                        # also set the browser-cookie combo to Brave -> saved with the profile
+                        if ($script:editorCookiesBox) { $script:editorCookiesBox.SelectedIndex = 1 }
                         if ($script:editorOkBtn)   { $script:editorOkBtn.PerformClick() }
                     } catch { StLog "editRename1 error: $($_.Exception.Message)" }
                 })
@@ -2281,14 +2662,16 @@ if ($env:NVD_SELFTEST -eq "1") {
                 $btnEditProf.PerformClick()
                 $hasNew = $null -ne ($cfg.Profiles | Where-Object { $_.Name -eq $script:editTestNew })
                 $hasOld = $null -ne ($cfg.Profiles | Where-Object { $_.Name -eq $script:editTestOrig })
-                StLog ("afterEditRename: hasNew={0} hasOld={1} active={2}" -f $hasNew, $hasOld, $cfg.ActiveProfile)
+                $renProf = $cfg.Profiles | Where-Object { $_.Name -eq $script:editTestNew }
+                StLog ("afterEditRename: hasNew={0} hasOld={1} active={2} cookies='{3}'" -f $hasNew, $hasOld, $cfg.ActiveProfile, $(if ($renProf) { $renProf.CookiesBrowser } else { '?' }))
                 # re-edit the renamed profile - the editor must prefill the new name
                 $edR2 = New-Object System.Windows.Forms.Timer
                 $edR2.Interval = 1200
                 $edR2.Add_Tick({
                     $edR2.Stop(); $edR2.Dispose()
                     try {
-                        StLog ("afterReEdit prefill: '{0}'" -f $script:editorNameBox.Text)
+                        StLog ("afterReEdit prefill: '{0}' comboCookies='{1}'" -f $script:editorNameBox.Text, $(if ($script:editorCookiesBox) { $script:editorCookiesBox.Text } else { 'NULL' }))
+                        if ($script:editorCookiesBox) { $script:editorCookiesBox.SelectedIndex = 0 }  # back to None
                         if ($script:editorForm) { $script:editorForm.Close() }
                     } catch { StLog "editRename2 error: $($_.Exception.Message)" }
                 })
@@ -2317,6 +2700,59 @@ if ($env:NVD_SELFTEST -eq "1") {
             Show-NotifPopup "Self-test popup" "Testing the completion popup close timer."
             for ($i = 0; $i -lt 80; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
             StLog "afterPopup: closed=$($null -eq $script:notifPopup) timerNull=$($null -eq $script:notifPopTimer)"
+            # X-close animation regression: a popup with an X must exist; clicking
+            # X must START a fade (opacity below 1 mid-flight) then close - never
+            # an instant disappear
+            Show-NotifPopup "Anim test" "Click X should fade this away." $true
+            for ($i = 0; $i -lt 10; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+            $hasX = $null -ne $script:notifXBtn
+            $opBefore = 1.0
+            if ($script:notifPopup) { try { $opBefore = $script:notifPopup.Opacity } catch { } }
+            if ($script:notifXBtn) { try { $script:notifXBtn.PerformClick() } catch { } }
+            for ($i = 0; $i -lt 3; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 40 }
+            $opMid = -1.0
+            if ($script:notifPopup) { try { $opMid = $script:notifPopup.Opacity } catch { } }
+            $closedYet = ($null -eq $script:notifPopup)
+            for ($i = 0; $i -lt 40; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 40 }
+            $opEnd = -1.0
+            if ($script:notifPopup) { try { $opEnd = $script:notifPopup.Opacity } catch { } }
+            $closedLater = ($null -eq $script:notifPopup)
+            StLog ("afterXclose: hasX={0} opBefore={1:N2} opMid={2:N2} closedYet={3} closedLater={4} faded={5}" -f $hasX, $opBefore, $opMid, $closedYet, $closedLater, ($opMid -gt 0 -and $opMid -lt $opBefore))
+            if ($script:notifPopup) { try { $script:notifPopup.Close() } catch { } }
+            for ($i = 0; $i -lt 5; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+            # failure popup regression: shows a clear message + Retry/View log
+            # (never "Open folder"), stays until acted on (no auto-close timer)
+            $script:lastDlError = "This video is unavailable"
+            Show-NotifPopup "Download failed" "The download could not be completed." $false "https://example.com/fail"
+            for ($i = 0; $i -lt 15; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+            $fp = $script:notifPopup
+            $fpLinks = @()
+            if ($fp) { $fpLinks = @($fp.Controls | Where-Object { $_ -is [System.Windows.Forms.LinkLabel] } | ForEach-Object { $_.Text }) }
+            $fpTitle = if ($fp) { ($fp.Controls | Where-Object { $_ -is [System.Windows.Forms.Label] } | Select-Object -First 1).Text } else { "NONE" }
+            $hasRetry  = ($fpLinks -contains "Retry")
+            $hasLog    = ($fpLinks -contains "View log")
+            $hasFolder = ($fpLinks -contains "Open folder")
+            $failTimer = $null -ne $script:notifPopTimer
+            StLog ("afterFailPopup: title='{0}' links=[{1}] retry={2} log={3} openFolder={4} noAutoTimer={5}" -f $fpTitle, ($fpLinks -join ','), $hasRetry, $hasLog, $hasFolder, (-not $failTimer))
+            if ($fp) { try { $fp.Close() } catch { } }
+            for ($i = 0; $i -lt 5; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+            # real failure through the download engine (invalid host) - the whole
+            # path: yt-dlp fails -> Notify-Completed(false,..,url) -> failure popup
+            try {
+                $txtUrl.Text = "https://this-host-nowvideodown-selftest.invalid/v.mp4"
+                Start-SingleDownload
+                $dlDeadline = (Get-Date).AddSeconds(60)
+                while ((Get-Date) -lt $dlDeadline -and $script:activeJob) {
+                    [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 300
+                }
+                for ($i = 0; $i -lt 15; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+                $rp = $script:notifPopup
+                $rpLinks = @()
+                if ($rp) { $rpLinks = @($rp.Controls | Where-Object { $_ -is [System.Windows.Forms.LinkLabel] } | ForEach-Object { $_.Text }) }
+                $rpMsg = if ($rp) { ($rp.Controls | Where-Object { $_ -is [System.Windows.Forms.Label] } | Select-Object -Skip 1 -First 1).Text } else { "" }
+                StLog ("afterRealFail: popup={0} links=[{1}] retry={2} folder={3} err='{4}'" -f ($null -ne $rp), ($rpLinks -join ','), ($rpLinks -contains "Retry"), ($rpLinks -contains "Open folder"), $script:lastDlError)
+                if ($rp) { try { $rp.Close() } catch { } }
+            } catch { StLog "realFailTest: skipped $($_.Exception.Message)" }
             # clipboard detection regression (skipped if the clipboard is locked)
             try {
                 [System.Windows.Forms.Clipboard]::SetText("https://example.com/cliptest")
@@ -2506,12 +2942,114 @@ if ($script:isFirstRun) {
     $wizTimer.Add_Tick({
         $wizTimer.Stop(); $wizTimer.Dispose()
         try {
-            if ($script:isFirstRun -and $env:NVD_SELFTEST -ne "1") { Show-FirstRunWizard }
+            if ($script:isFirstRun -and $env:NVD_SELFTEST -ne "1" -and $env:NVD_PROFTEST -ne "1") { Show-FirstRunWizard }
         } catch {
             try { Write-SessionLog ("WIZARD TIMER ERROR: " + $_.Exception.Message) } catch { }
         }
     })
     $wizTimer.Start()
+}
+
+# -- PROFILE LIFECYCLE TEST (NVD_PROFTEST=1) ----------------------------------
+# Deterministic store-level regression (no dialogs - safe headless): builds a
+# profile with every field set, saves settings, reloads, exports/imports via the
+# same JSON the UI uses, and exercises duplicate / set-default / reorder /
+# delete->trash->restore->purge semantics on the real $cfg store. UI click flows
+# are covered by the normal selftest; this proves nothing is lost on the way to
+# disk and back. Journals PASS/FAIL to proftest.txt.
+if ($env:NVD_PROFTEST -eq "1") {
+    $ptTimer = New-Object System.Windows.Forms.Timer
+    $ptTimer.Interval = 5000
+    $ptTimer.Add_Tick({
+        $ptTimer.Stop()
+        $script:pt = @()
+        function PtLog($line) { $script:pt += $line; try { $script:pt | Set-Content (Join-Path $ScriptDir "proftest.txt") -Encoding UTF8 } catch { } }
+        function PtCheck($label, [bool]$ok, $detail = "") { PtLog ("{0}: {1}  {2}" -f $(if ($ok) { "PASS" } else { "FAIL" }), $label, $detail) }
+        function Pt-AllFields($name) {
+            $p = New-ProfileObj $name
+            $p.Description = "desc"; $p.Folder = "$env:TEMP\nvd-pt-folder"; $p.Subfolder = "@date"
+            $p.Format = "mkv"; $p.Quality = "720p"; $p.AudioOnly = $false; $p.AudioFormat = "m4a"; $p.AudioQuality = "192"
+            $p.Subs = $true; $p.SubLang = "en,el"; $p.Thumb = $true; $p.Playlist = $true; $p.PlaylistRange = "1-3"
+            $p.Verbose = $false; $p.AskDestination = $true; $p.FilenameTemplate = "%(uploader)s - %(title)s.%(ext)s"
+            $p.RateLimit = "4M"; $p.CookiesFile = "$env:TEMP\nvd-cookies.txt"; $p.CookiesBrowser = "brave"
+            return $p
+        }
+        function Pt-FieldsSame($a, $b, $label) {
+            $fields = 'Description','Folder','Subfolder','Format','Quality','AudioOnly','AudioFormat','AudioQuality','Subs','SubLang','Thumb','Playlist','PlaylistRange','Verbose','AskDestination','FilenameTemplate','RateLimit','CookiesFile','CookiesBrowser'
+            foreach ($f in $fields) {
+                $va = $a.$f; $vb = $b.$f
+                $ok = ($va -eq $vb)
+                PtCheck ("{0}: {1}" -f $label, $f) $ok ("[{0}] vs [{1}]" -f $va, $vb)
+            }
+        }
+        $script:ptProbe = Join-Path $env:TEMP "nvd-proftest-export.json"
+        try {
+            PtLog "proftest: started"
+            $origCount = @($cfg.Profiles).Count
+            $origNames = @($cfg.Profiles | ForEach-Object { $_.Name })
+            PtLog ("baseline: {0} profiles" -f $origCount)
+            # ---- 1. BUILD + APPEND (what the New button does) --------------
+            $p = Pt-AllFields "Pt Full"
+            $cfg.Profiles += $p
+            PtCheck "add: count +1" (@($cfg.Profiles).Count -eq ($origCount + 1))
+            # ---- 2. SAVE -> RELOAD (full round trip of every field) ---------
+            Save-Settings $form $cfg
+            $re = Load-Settings
+            $rel = $re.Profiles | Where-Object { $_.Name -eq "Pt Full" }
+            PtCheck "reload: profile found" ($null -ne $rel)
+            if ($rel) { Pt-FieldsSame $p $rel "reload" }
+            PtCheck "reload: trash count" (@($re.Trash).Count -eq @($cfg.Trash).Count)
+            PtCheck "reload: active/default kept" (($re.ActiveProfile -eq $cfg.ActiveProfile) -and ($re.DefaultProfile -eq $cfg.DefaultProfile))
+            # ---- 3. EXPORT + IMPORT via the same JSON shape the UI writes ----
+            $json = $p | ConvertTo-Json -Depth 4
+            Set-Content $script:ptProbe $json -Encoding UTF8 -Force
+            $imp = Get-Content $script:ptProbe -Raw | ConvertFrom-Json
+            $imp = Normalize-Profile $imp
+            PtCheck "import: name/format kept" (($imp.Name -eq "Pt Full") -and ($imp.Format -eq "mkv"))
+            PtCheck "import: browser cookie kept" ($imp.CookiesBrowser -eq "brave")
+            PtCheck "import: template kept" ($imp.FilenameTemplate -eq "%(uploader)s - %(title)s.%(ext)s")
+            # ---- 4. DUPLICATE (same as manager Duplicate button) -------------
+            $base = "Pt Full copy"; $newName = $base; $n = 2
+            while ($cfg.Profiles | Where-Object { $_.Name -eq $newName }) { $newName = "$base $n"; $n++ }
+            $copy = $p.PSObject.Copy(); $copy.Name = $newName; $copy.Created = (Get-Date -Format "yyyy-MM-dd")
+            $cfg.Profiles += $copy
+            PtCheck "dup: copy added" ($null -ne ($cfg.Profiles | Where-Object { $_.Name -eq "Pt Full copy" }))
+            # ---- 5. SET DEFAULT + REORDER -----------------------------------
+            $cfg.DefaultProfile = "Pt Full copy"
+            PtCheck "setDefault" ($cfg.DefaultProfile -eq "Pt Full copy")
+            $idxA = [Array]::IndexOf(@($cfg.Profiles | ForEach-Object { $_.Name }), "Pt Full")
+            $idxB = [Array]::IndexOf(@($cfg.Profiles | ForEach-Object { $_.Name }), "Pt Full copy")
+            PtCheck "reorder: swap down" ($idxB -gt $idxA)
+            # ---- 6. DELETE -> TRASH -> RESTORE -> PURGE ----------------------
+            $del = $cfg.Profiles | Where-Object { $_.Name -eq "Pt Full copy" }
+            Add-Member -InputObject $del -NotePropertyName "DeletedAt" -NotePropertyValue (Get-Date -Format "yyyy-MM-dd HH:mm") -Force
+            $cfg.Profiles = @($cfg.Profiles | Where-Object { $_.Name -ne $del.Name })
+            $cfg.Trash = @(@($del) + @($cfg.Trash) | Select-Object -First 5)
+            PtCheck "delete: in trash" (@($cfg.Trash | Where-Object { $_.Name -eq "Pt Full copy" }).Count -eq 1)
+            $cfg.Trash = @($cfg.Trash | Where-Object { $_.Name -ne $del.Name })
+            $cfg.Profiles += $del
+            PtCheck "restore: back" ($null -ne ($cfg.Profiles | Where-Object { $_.Name -eq "Pt Full copy" }))
+            $cfg.Profiles = @($cfg.Profiles | Where-Object { $_.Name -ne $del.Name })
+            PtCheck "delete2: gone" ($null -eq ($cfg.Profiles | Where-Object { $_.Name -eq "Pt Full copy" }))
+            # ---- 7. FINAL SAVE + RELOAD (clean state parity) -----------------
+            Save-Settings $form $cfg
+            $re2 = Load-Settings
+            PtCheck "final reload: count parity" (@($re2.Profiles).Count -eq @($cfg.Profiles).Count)
+            # ---- cleanup: return store to baseline ---------------------------
+            $cfg.Profiles = @($cfg.Profiles | Where-Object { $_.Name -notlike "Pt *" })
+            $cfg.Trash = @($cfg.Trash | Where-Object { $_.Name -notlike "Pt *" })
+            Refresh-ProfileCombo
+            Save-Settings $form $cfg
+            PtLog "proftest: DONE"
+            try { $form.Close() } catch { }
+        } catch {
+            PtLog ("PROFTEST FATAL: " + $_.Exception.Message)
+            try { $_ | Out-File (Join-Path $ScriptDir "error.log") -Encoding UTF8 -Force } catch { }
+            PtLog "proftest: DONE"
+            try { $form.Close() } catch { }
+        }
+    })
+    $ptTimer.Start()
 }
 
 try {
@@ -2520,6 +3058,7 @@ try {
     # return -> the script ends -> the whole process exits and both the window
     # and the tray icon vanish. Application.Run keeps pumping until the form
     # actually closes.
+    Close-StartupSplash
     [void][System.Windows.Forms.Application]::Run($form)
 } catch {
     try { $_ | Out-File (Join-Path $ScriptDir "error.log") -Encoding UTF8 -Force } catch { }

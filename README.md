@@ -6,7 +6,7 @@ Paste a link, choose where to save it, click Download. That's the whole idea.
 It wraps [yt-dlp](https://github.com/yt-dlp/yt-dlp) and [ffmpeg](https://ffmpeg.org/) in a proper window,
 so you never have to touch the command line.
 
-**Current version: 2.42**
+**Current version: 2.43**
 
 ## Why you'll like it
 

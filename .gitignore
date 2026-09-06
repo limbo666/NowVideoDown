@@ -7,6 +7,7 @@ log.txt
 log.old.txt
 error.log
 selftest.txt
+proftest.txt
 *.part
 *.ytdl
 *.frag

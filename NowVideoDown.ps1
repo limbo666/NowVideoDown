@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.42)
+    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.43)
 .NOTES
     Requires:  yt-dlp.exe (+ ffmpeg.exe for merging/thumbnails)
                Place both next to this script.
@@ -301,6 +301,7 @@ $script:onDoneCallback = $null; $script:batchLinks = @(); $script:batchTotal = 0
 $script:lastDownloadedFile = $null; $script:isUpdatingUI = $false
 $script:lastDlUrl = $null; $script:lastDlError = ""
 $script:jobExitCode = $null
+$script:upJob = $null; $script:upTimer = $null; $script:upExitCode = $null
 $script:runFolderOverride = $null; $script:isDirty = $false; $script:pasteDlTimer = $null
 $script:inTray = $false; $script:tray = $null; $script:notifPopup = $null; $script:notifPopTimer = $null; $script:notifCloseTimer = $null; $script:notifFailUrl = ""; $script:notifXBtn = $null; $script:notifXColor = $null; $script:notifXHover = $null; $script:aboutForm = $null; $script:managerForm = $null; $script:editorForm = $null; $script:editorNameBox = $null; $script:editorOkBtn = $null; $script:editorCookiesBox = $null; $script:editorG4 = $null; $script:editorG3 = $null; $script:wizardForm = $null; $script:wizardThemeBox = $null; $script:editorMap = $null; $script:inputBoxForm = $null; $script:inputBoxText = $null; $script:inputBoxOk = $null
 $script:managerBtnNew = $null; $script:managerBtnEdit = $null; $script:managerBtnRename = $null; $script:managerBtnDup = $null; $script:managerBtnSetDef = $null; $script:managerBtnUp = $null; $script:managerBtnDown = $null; $script:managerBtnExport = $null; $script:managerBtnExpAll = $null; $script:managerBtnImport = $null; $script:managerBtnTrash = $null; $script:managerBtnClose = $null
@@ -346,7 +347,7 @@ function Get-ThemePalette($themeName) {
 # -- FORM SETUP ------------------------------------------------------------
 Update-StartupSplash "Building the main window..."
 $form = New-Object System.Windows.Forms.Form
-$form.Text            = "Now Video Down - Pro Edition v2.42"
+$form.Text            = "Now Video Down - Pro Edition v2.43"
 $winW = if ($cfg.WinW -and $cfg.WinW -gt 500) { [int]$cfg.WinW } else { 900 }
 $winH = if ($cfg.WinH -and $cfg.WinH -gt 500) { [int]$cfg.WinH } else { 915 }
 $form.ClientSize      = [System.Drawing.Size]::new($winW, $winH)
@@ -451,7 +452,7 @@ $lblSub.Text = "YouTube | Facebook | Twitter/X | Instagram | TikTok | 1000+ site
 $lblSub.Font = $fSub; $lblSub.Location = [System.Drawing.Point]::new(20,65); $lblSub.AutoSize = $true
 
 $lblCredits = New-Object System.Windows.Forms.Label
-$lblCredits.Text = "v 2.42 Pro Edition - Nikos Georgousis"
+$lblCredits.Text = "v 2.43 Pro Edition - Nikos Georgousis"
 $lblCredits.Font = $fSub; $lblCredits.Location = [System.Drawing.Point]::new(620,40); $lblCredits.AutoSize = $true
 
 # Group 1: Source (GroupBox) - URL/batch row + clipboard detection row
@@ -1024,7 +1025,7 @@ function Show-AboutDialog {
         $lblTitleAbt.AutoSize = $true; $lblTitleAbt.ForeColor = $t.Accent
 
         $lblVer = New-Object System.Windows.Forms.Label
-        $lblVer.Text = "Pro Edition v2.42"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
+        $lblVer.Text = "Pro Edition v2.43"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
         $lblVer.AutoSize = $true; $lblVer.ForeColor = $t.Text
 
         $lblDesc = New-Object System.Windows.Forms.Label
@@ -1200,6 +1201,29 @@ function Get-YtdlpArgs($url) {
     return $a.ToArray()
 }
 
+# Translate raw yt-dlp cookie-database errors into a short actionable reason
+# for the failure popup. Chromium browsers lock their cookie database while
+# running (yt-dlp issue #7271), and Chrome 127+ adds app-bound encryption - the
+# raw error ("Could not copy Chrome cookie database ... #7271") is noise to a
+# normal user, so the popup should tell them what to DO instead.
+function Format-DlError($raw) {
+    try {
+        if ([string]::IsNullOrWhiteSpace($raw)) { return "" }
+        $s = [string]$raw
+        $low = $s.ToLowerInvariant()
+        if ($low -match 'cookie database|cookies-from-browser|app-bound|could not extract cookies') {
+            $br = 'the browser'
+            if     ($low -match 'chrome')  { $br = 'Chrome' }
+            elseif ($low -match 'brave')   { $br = 'Brave' }
+            elseif ($low -match 'edge')    { $br = 'Edge' }
+            elseif ($low -match 'firefox') { $br = 'Firefox' }
+            $s = "Close $br completely and press Retry - yt-dlp cannot read the cookies of a running browser. If it still fails after closing (Chrome 127+ encrypts its cookie database), use the profile's LOGIN & COOKIES tab with an exported cookies.txt file instead."
+        }
+        if ($s.Length -gt 400) { $s = $s.Substring(0, 400) }
+        return $s
+    } catch { return $raw }
+}
+
 # -- CORE DOWNLOAD ENGINE --------------------------------------------------
 function Start-Download($url, [scriptblock]$callback) {
     if (-not $script:ytdlp) {
@@ -1207,6 +1231,38 @@ function Start-Download($url, [scriptblock]$callback) {
             [System.Windows.Forms.MessageBoxButtons]::OK,[System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
         if ($callback) { & $callback $false }
         return
+    }
+
+    # Login-cookies pre-flight: yt-dlp cannot read the cookie database of a
+    # RUNNING browser (yt-dlp issue #7271 - "Could not copy Chrome cookie
+    # database"). Fail fast with an actionable message instead of launching a
+    # download that is guaranteed to fail with the cryptic raw error. Only
+    # applies when the browser-cookie route will actually be used (a valid
+    # cookies.txt file takes precedence, exactly like Get-YtdlpArgs).
+    $pfProf = Get-ActiveProfile
+    if ($pfProf -and $pfProf.CookiesBrowser -and -not ($pfProf.CookiesFile -and (Test-Path $pfProf.CookiesFile))) {
+        $pfBrowser = ([string]$pfProf.CookiesBrowser).Trim().ToLower()
+        $pfProc = switch ($pfBrowser) {
+            'edge'      { 'msedge' }
+            'chromium'  { 'chrome' }
+            'brave'     { 'brave' }
+            'chrome'    { 'chrome' }
+            'firefox'   { 'firefox' }
+            'opera'     { 'opera' }
+            'vivaldi'   { 'vivaldi' }
+            default     { $null }
+        }
+        $pfRunning = $null
+        if ($pfProc) { try { $pfRunning = Get-Process -Name $pfProc -ErrorAction SilentlyContinue | Select-Object -First 1 } catch { } }
+        if ($pfRunning) {
+            $pfTitle = (Get-Culture).TextInfo.ToTitleCase($pfBrowser)
+            $script:lastDlUrl = $url; $script:lastDlError = ""
+            $script:lastDlError = "Close $pfTitle, then press Retry - yt-dlp cannot read the cookies of a running browser."
+            Log ("This profile logs in with " + $pfTitle + " cookies, but " + $pfTitle + " is currently open.") "Yellow"
+            Log ("yt-dlp needs the browser CLOSED to copy its cookie database (issue #7271). Close " + $pfTitle + " and retry, or point the profile at a cookies.txt file instead.") "Yellow"
+            if ($callback) { & $callback $false }
+            return
+        }
     }
 
     $script:onDoneCallback = $callback; $script:cancelRequested = $false; Set-CancelButtonState $true; $btnPlayLast.Visible = $false; SetProgress 0
@@ -1254,7 +1310,7 @@ function Start-Download($url, [scriptblock]$callback) {
                     SetStatus "Post-processing with ffmpeg..."
                     if ($chkVerbose.Checked -and $s.Trim()) { Log $s }
                 } 
-                elseif ($s -match 'ERROR:') { Log $s "Red"; SetStatus "Error - see log"; if ([string]::IsNullOrWhiteSpace($script:lastDlError)) { $script:lastDlError = ($s -replace '^ERROR:\s*','').Trim() } } 
+                elseif ($s -match 'ERROR:') { Log $s "Red"; SetStatus "Error - see log"; if ([string]::IsNullOrWhiteSpace($script:lastDlError)) { $script:lastDlError = Format-DlError (($s -replace '^ERROR:\s*','').Trim()) } } 
                 elseif ($s.Trim() -ne '') { if ($chkVerbose.Checked -and -not $s.StartsWith("[debug]", [System.StringComparison]::OrdinalIgnoreCase)) { Log $s } }
             }
 
@@ -1266,7 +1322,7 @@ function Start-Download($url, [scriptblock]$callback) {
                     foreach ($r in $rem) { 
                         $s = [string]$r
                         if ($s -match '^__EXITCODE__:(\d+)') { $script:jobExitCode = [int]$Matches[1]; continue }
-                        if ($s.Trim() -ne '') { if ($s -match 'ERROR:') { Log $s "Red"; if ([string]::IsNullOrWhiteSpace($script:lastDlError)) { $script:lastDlError = ($s -replace '^ERROR:\s*','').Trim() } } elseif ($chkVerbose.Checked -and -not $s.StartsWith("[debug]", [System.StringComparison]::OrdinalIgnoreCase)) { Log $s } } 
+                        if ($s.Trim() -ne '') { if ($s -match 'ERROR:') { Log $s "Red"; if ([string]::IsNullOrWhiteSpace($script:lastDlError)) { $script:lastDlError = Format-DlError (($s -replace '^ERROR:\s*','').Trim()) } } elseif ($chkVerbose.Checked -and -not $s.StartsWith("[debug]", [System.StringComparison]::OrdinalIgnoreCase)) { Log $s } } 
                     }
                 } catch {}
                 
@@ -2126,27 +2182,84 @@ $btnCancel.Add_Click({
 
 # -- TOOL UPDATERS ---------------------------------------------------------
 $menuUpdateYt.Add_Click({
-    if ($script:ytdlp -or $ytdlp) {
+    if ($script:upJob -or $script:dlJob) { SetStatus "A yt-dlp update is already running..."; return }
+    if ($script:ytdlp) {
+        # Self-update as a background job that streams yt-dlp's own output into
+        # the log. (The old Start-Process -NoNewWindow -Wait swallowed all of
+        # yt-dlp's output, needed an attached console, and still logged
+        # "completed" when the update had actually failed - i.e. looked broken.)
         SetStatus "Updating yt-dlp..."; Log "Running yt-dlp -U..." "Yellow"
-        $exe = if ($script:ytdlp) { $script:ytdlp } else { $ytdlp }
-        Start-Process -FilePath $exe -ArgumentList "-U" -NoNewWindow -Wait; 
-        
-        Update-UIState -ResetStatus
-        Log "yt-dlp update check completed." "Lime"
-        $lnkUpdateYt.Visible = $false
-        Check-YtDlpVersion
+        $script:upExitCode = $null   # script-scope: kept across timer ticks
+        $script:upJob = Start-Job { param($exePath); & $exePath -U 2>&1; Write-Output ("__EXITCODE__:" + $LASTEXITCODE) } -ArgumentList $script:ytdlp
+        if ($script:upTimer) { try { $script:upTimer.Stop(); $script:upTimer.Dispose() } catch { }; $script:upTimer = $null }
+        $script:upTimer = New-Object System.Windows.Forms.Timer; $script:upTimer.Interval = 400
+        $script:upTimer.Add_Tick({
+            try {
+                if (-not $script:upJob) { $script:upTimer.Stop(); $script:upTimer.Dispose(); $script:upTimer = $null; return }
+                $upLines = @(Receive-Job $script:upJob -ErrorAction SilentlyContinue)
+                foreach ($upL in $upLines) { $upS = [string]$upL; if ($upS -match '^__EXITCODE__:(\d+)') { $script:upExitCode = [int]$Matches[1]; continue }; if ($upS.Trim()) { Log $upS } }
+                try { $upState = (Get-Job -Id $script:upJob.Id -ErrorAction Stop).State } catch { $upState = 'Completed' }
+                if ($upState -in @('Completed','Failed','Stopped')) {
+                    $script:upTimer.Stop(); $script:upTimer.Dispose(); $script:upTimer = $null
+                    $upEc = $script:upExitCode
+                    try {
+                        $upRem = @(Receive-Job $script:upJob -ErrorAction SilentlyContinue)
+                        foreach ($upR in $upRem) { $upS2 = [string]$upR; if ($upS2 -match '^__EXITCODE__:(\d+)') { $upEc = [int]$Matches[1]; continue }; if ($upS2.Trim()) { Log $upS2 } }
+                    } catch { }
+                    try { Remove-Job $script:upJob -Force -ErrorAction SilentlyContinue } catch { }
+                    $script:upJob = $null
+                    $script:upExitCode = $null
+                    Update-UIState -ResetStatus
+                    if ($upState -eq 'Completed' -and $upEc -eq 0) {
+                        Log "yt-dlp is up to date (or has been updated)." "Lime"
+                        $lnkUpdateYt.Visible = $false
+                    } elseif ($upState -eq 'Completed') {
+                        # native run finished; only reachable if the exit-code
+                        # marker was somehow lost - never claim failure on a run
+                        # that printed a normal result
+                        Log "yt-dlp self-update finished (no clean exit code reported)." "Yellow"
+                        $lnkUpdateYt.Visible = $false
+                    } else {
+                        Log ("yt-dlp self-update could not complete (state {0}). Often antivirus or a read-only copy - download yt-dlp.exe from the GitHub releases page and replace the file next to the script." -f $upState) "Red"
+                    }
+                    Check-YtDlpVersion
+                }
+            } catch {
+                try { Write-SessionLog ("YT-UPDATE TICK ERROR: " + $_.Exception.Message); $_ | Out-File (Join-Path $ScriptDir "error.log") -Encoding UTF8 -Force } catch { }
+            }
+        })
+        $script:upTimer.Start()
     } else {
         SetStatus "Downloading yt-dlp.exe..."; Log "Fetching latest release from GitHub..." "Yellow"
         $btnDownload.Enabled = $false; $btnList.Enabled = $false
-        $script:dlJob = Start-Job { param($dest); [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile $dest -UseBasicParsing } -ArgumentList (Join-Path $ScriptDir "yt-dlp.exe")
+        $script:dlJob = Start-Job {
+            param($dest)
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            try { Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile $dest -UseBasicParsing -TimeoutSec 90 }
+            catch { Write-Output ("DOWNLOAD-ERROR: " + $_.Exception.Message); throw }
+        } -ArgumentList (Join-Path $ScriptDir "yt-dlp.exe")
         $script:dlTimer = New-Object System.Windows.Forms.Timer; $script:dlTimer.Interval = 500
         $script:dlTimer.Add_Tick({
             try {
-                if ($script:dlJob.State -ne 'Running') {
-                    $script:dlTimer.Stop(); $script:dlTimer.Dispose(); Receive-Job $script:dlJob | Out-Null; Remove-Job $script:dlJob -Force
-                    
+                if ($script:dlJob -and $script:dlJob.State -ne 'Running') {
+                    $script:dlTimer.Stop(); $script:dlTimer.Dispose()
+                    $dlErr = ""
+                    try {
+                        $dlOut = @(Receive-Job $script:dlJob -ErrorAction SilentlyContinue)
+                        foreach ($dlO in $dlOut) { $dlS = [string]$dlO; if ($dlS -match '^DOWNLOAD-ERROR:\s*(.*)$') { $dlErr = $Matches[1].Trim() } elseif ($dlS.Trim()) { Log $dlS "Yellow" } }
+                    } catch { }
+                    try { Remove-Job $script:dlJob -Force -ErrorAction SilentlyContinue } catch { }
+                    $script:dlJob = $null
                     Update-UIState -ResetStatus
-                    if ($script:ytdlp) { Log "yt-dlp downloaded successfully!" "Lime"; $lnkUpdateYt.Visible = $false; Check-YtDlpVersion } else { Log "yt-dlp download failed." "Red" }
+                    if ($script:ytdlp) {
+                        Log "yt-dlp downloaded successfully!" "Lime"; $lnkUpdateYt.Visible = $false; Check-YtDlpVersion
+                    } else {
+                        Log "yt-dlp download failed." "Red"
+                        if ($dlErr) { Log ("  Reason: " + $dlErr) "Red" }
+                        try {
+                            [System.Windows.Forms.MessageBox]::Show(("yt-dlp.exe could not be downloaded from GitHub." + $(if ($dlErr) { "`n`n" + $dlErr } else { "" }) + "`n`nCheck your internet connection or proxy and try again - or download yt-dlp.exe from the GitHub releases page and place it next to NowVideoDown.ps1."), "yt-dlp download failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                        } catch { }
+                    }
                 }
             } catch {
                 try { Write-SessionLog ("DL TICK ERROR: " + $_.Exception.Message); $_ | Out-File (Join-Path $ScriptDir "error.log") -Encoding UTF8 -Force } catch { }
@@ -2156,43 +2269,54 @@ $menuUpdateYt.Add_Click({
 })
 
 $menuUpdateFfmpeg.Add_Click({
+    if ($script:dlJobFfmpeg) { SetStatus "An ffmpeg download is already running..."; return }
     SetStatus "Downloading ffmpeg (this may take a minute)..."; Log "Fetching yt-dlp ffmpeg build from GitHub..." "Yellow"
     $btnDownload.Enabled = $false; $btnList.Enabled = $false
-    
+
     $script:dlJobFfmpeg = Start-Job {
         param($destDir)
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         $zipUrl = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
         $zipPath = Join-Path $destDir "ffmpeg_temp.zip"
         $extractPath = Join-Path $destDir "ffmpeg_extract"
-        
         try {
-            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+            Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing -TimeoutSec 120
             if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
             Expand-Archive -Path $zipPath -DestinationPath $extractPath -Force
-            
             $ffmpegExe = Get-ChildItem -Path $extractPath -Filter "ffmpeg.exe" -Recurse | Select-Object -First 1
             if ($ffmpegExe) {
                 Move-Item -Path $ffmpegExe.FullName -Destination (Join-Path $destDir "ffmpeg.exe") -Force
-            }
+            } else { Write-Output "FFMPEG-ERROR: the downloaded archive contained no ffmpeg.exe" }
+        } catch {
+            Write-Output ("FFMPEG-ERROR: " + $_.Exception.Message)
         } finally {
             if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
             if (Test-Path $extractPath) { Remove-Item $extractPath -Recurse -Force }
         }
     } -ArgumentList $ScriptDir
-    
+
     $script:dlTimerFfmpeg = New-Object System.Windows.Forms.Timer; $script:dlTimerFfmpeg.Interval = 1000
     $script:dlTimerFfmpeg.Add_Tick({
         try {
-            if ($script:dlJobFfmpeg.State -ne 'Running') {
-                $script:dlTimerFfmpeg.Stop(); $script:dlTimerFfmpeg.Dispose(); Receive-Job $script:dlJobFfmpeg | Out-Null; Remove-Job $script:dlJobFfmpeg -Force
-                
+            if ($script:dlJobFfmpeg -and $script:dlJobFfmpeg.State -ne 'Running') {
+                $script:dlTimerFfmpeg.Stop(); $script:dlTimerFfmpeg.Dispose()
+                $ffErr = ""
+                try {
+                    $ffOut = @(Receive-Job $script:dlJobFfmpeg -ErrorAction SilentlyContinue)
+                    foreach ($ffO in $ffOut) { $ffS = [string]$ffO; if ($ffS -match '^FFMPEG-ERROR:\s*(.*)$') { $ffErr = $Matches[1].Trim() } elseif ($ffS.Trim()) { Log $ffS "Yellow" } }
+                } catch { }
+                try { Remove-Job $script:dlJobFfmpeg -Force -ErrorAction SilentlyContinue } catch { }
+                $script:dlJobFfmpeg = $null
                 Update-UIState -ResetStatus
-                if ($script:ffmpeg) { 
+                if ($script:ffmpeg) {
                     Log "ffmpeg downloaded and extracted successfully!" "Lime"
                     Sync-UI-To-Profile $cfg.ActiveProfile
-                } else { 
-                    Log "ffmpeg download or extraction failed." "Red" 
+                } else {
+                    Log "ffmpeg download or extraction failed." "Red"
+                    if ($ffErr) { Log ("  Reason: " + $ffErr) "Red" }
+                    try {
+                        [System.Windows.Forms.MessageBox]::Show(("ffmpeg.exe could not be downloaded from GitHub." + $(if ($ffErr) { "`n`n" + $ffErr } else { "" }) + "`n`nCheck your internet connection or proxy and try again - or use 'Get ffmpeg manually' and place ffmpeg.exe next to NowVideoDown.ps1."), "ffmpeg download failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+                    } catch { }
                 }
             }
         } catch {
@@ -2229,6 +2353,12 @@ $form.Add_FormClosing({
     if ($script:pasteDlTimer) { try{$script:pasteDlTimer.Stop(); $script:pasteDlTimer.Dispose() }catch{} }
     if ($script:updTimer)     { try{$script:updTimer.Stop(); $script:updTimer.Dispose() }catch{} }
     if ($script:updateJob)    { try{Remove-Job $script:updateJob -Force -ErrorAction SilentlyContinue}catch{} }
+    if ($script:upTimer)      { try{$script:upTimer.Stop(); $script:upTimer.Dispose() }catch{} }
+    if ($script:upJob)        { try{Stop-Job $script:upJob -ErrorAction SilentlyContinue; Remove-Job $script:upJob -Force -ErrorAction SilentlyContinue}catch{} }
+    if ($script:dlTimer)      { try{$script:dlTimer.Stop(); $script:dlTimer.Dispose() }catch{} }
+    if ($script:dlJob)        { try{Stop-Job $script:dlJob -ErrorAction SilentlyContinue; Remove-Job $script:dlJob -Force -ErrorAction SilentlyContinue}catch{} }
+    if ($script:dlTimerFfmpeg){ try{$script:dlTimerFfmpeg.Stop(); $script:dlTimerFfmpeg.Dispose() }catch{} }
+    if ($script:dlJobFfmpeg)  { try{Stop-Job $script:dlJobFfmpeg -ErrorAction SilentlyContinue; Remove-Job $script:dlJobFfmpeg -Force -ErrorAction SilentlyContinue}catch{} }
     if ($script:activeJob)   { Stop-Job $script:activeJob -ErrorAction SilentlyContinue; Remove-Job $script:activeJob -Force -ErrorAction SilentlyContinue }
     Get-Process -Name "yt-dlp", "ffmpeg" -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $script:knownPIDs } | Stop-Process -Force -ErrorAction SilentlyContinue
 })
@@ -2505,7 +2635,7 @@ $form.Add_Resize({
     }
 })
 
-Write-SessionLog "--- Now Video Down v2.42 started ---"
+Write-SessionLog "--- Now Video Down v2.43 started ---"
 
 # -- SELF-TEST HOOK (only when NVD_SELFTEST=1) -----------------------------
 # Reproduces the minimize→tray→restore cycle in-process and writes the
@@ -2753,6 +2883,30 @@ if ($env:NVD_SELFTEST -eq "1") {
                 StLog ("afterRealFail: popup={0} links=[{1}] retry={2} folder={3} err='{4}'" -f ($null -ne $rp), ($rpLinks -join ','), ($rpLinks -contains "Retry"), ($rpLinks -contains "Open folder"), $script:lastDlError)
                 if ($rp) { try { $rp.Close() } catch { } }
             } catch { StLog "realFailTest: skipped $($_.Exception.Message)" }
+            # browser-login pre-flight: a download must abort IMMEDIATELY with an
+            # actionable message when the profile's login browser is RUNNING -
+            # never launch the doomed job or surface yt-dlp's cryptic raw cookie
+            # error. Runs only when a process named like the browser exists.
+            try {
+                $pfProf = Get-ActiveProfile
+                $pfWas = ""
+                if ($pfProf) {
+                    $pfWas = [string]$pfProf.CookiesBrowser
+                    Add-Member -InputObject $pfProf -NotePropertyName "CookiesBrowser" -NotePropertyValue "brave" -Force
+                }
+                if ($pfProf -and (Get-Process -Name "brave" -ErrorAction SilentlyContinue | Select-Object -First 1)) {
+                    $script:lastDlError = ""; $script:activeJob = $null
+                    $txtUrl.Text = "https://this-host-nowvideodown-selftest.invalid/v.mp4"
+                    Start-SingleDownload
+                    for ($i = 0; $i -lt 10; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+                    StLog ("preflightAbort: noJob={0} braveMsg={1}" -f ($null -eq $script:activeJob), ($script:lastDlError -like 'Close Brave*'))
+                    $pfPop = $script:notifPopup
+                    if ($pfPop) { try { $pfPop.Close() } catch { } }
+                    $script:lastDlError = ""
+                } elseif (-not $pfProf) { StLog "preflightAbort: skipped (no active profile)" }
+                else { StLog "preflightAbort: skipped (no running browser here)" }
+                if ($pfProf) { $pfProf.CookiesBrowser = $pfWas }
+            } catch { StLog "preflightAbort: error $($_.Exception.Message)" }
             # clipboard detection regression (skipped if the clipboard is locked)
             try {
                 [System.Windows.Forms.Clipboard]::SetText("https://example.com/cliptest")
@@ -2778,6 +2932,20 @@ if ($env:NVD_SELFTEST -eq "1") {
                 for ($i = 0; $i -lt 10; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
                 StLog "afterReset: gbStatus=$($gbStatus.Width)x$($gbStatus.Height) log=$($txtLog.Height)"
             } catch { StLog "layoutTest: error $($_.Exception.Message)" }
+            # Tools -> Download/Update yt-dlp: the self-update runs as a job that
+            # streams yt-dlp output and reports an honest result. Click it, wait
+            # for the job to finish, then confirm everything is cleaned up and no
+            # false failure message was logged (regression: lost exit code used
+            # to make a successful update report "could not complete").
+            try {
+                $menuUpdateYt.PerformClick()
+                $ytUpWaits = 0
+                while ($script:upJob -and $ytUpWaits -lt 300) {
+                    for ($i = 0; $i -lt 5; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100 }
+                    $ytUpWaits++
+                }
+                StLog ("afterYtSelfUpdate: done={0} timerNull={1} noFailMsg={2}" -f ($null -eq $script:upJob), ($null -eq $script:upTimer), ($txtLog.Text -notmatch 'could not complete'))
+            } catch { StLog "ytSelfUpdate: error $($_.Exception.Message)" }
         } catch { StLog "SELFTEST ERROR: $($_.Exception.Message)" }
         StLog "selftest: DONE"
         try { $form.Close() } catch { }

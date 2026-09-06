@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.43)
+    Now Video Down - PowerShell WinForms GUI (Pro Designer Edition v2.44)
 .NOTES
     Requires:  yt-dlp.exe (+ ffmpeg.exe for merging/thumbnails)
                Place both next to this script.
@@ -347,7 +347,7 @@ function Get-ThemePalette($themeName) {
 # -- FORM SETUP ------------------------------------------------------------
 Update-StartupSplash "Building the main window..."
 $form = New-Object System.Windows.Forms.Form
-$form.Text            = "Now Video Down - Pro Edition v2.43"
+$form.Text            = "Now Video Down - Pro Edition v2.44"
 $winW = if ($cfg.WinW -and $cfg.WinW -gt 500) { [int]$cfg.WinW } else { 900 }
 $winH = if ($cfg.WinH -and $cfg.WinH -gt 500) { [int]$cfg.WinH } else { 915 }
 $form.ClientSize      = [System.Drawing.Size]::new($winW, $winH)
@@ -452,7 +452,7 @@ $lblSub.Text = "YouTube | Facebook | Twitter/X | Instagram | TikTok | 1000+ site
 $lblSub.Font = $fSub; $lblSub.Location = [System.Drawing.Point]::new(20,65); $lblSub.AutoSize = $true
 
 $lblCredits = New-Object System.Windows.Forms.Label
-$lblCredits.Text = "v 2.43 Pro Edition - Nikos Georgousis"
+$lblCredits.Text = "v 2.44 Pro Edition - Nikos Georgousis"
 $lblCredits.Font = $fSub; $lblCredits.Location = [System.Drawing.Point]::new(620,40); $lblCredits.AutoSize = $true
 
 # Group 1: Source (GroupBox) - URL/batch row + clipboard detection row
@@ -1025,7 +1025,7 @@ function Show-AboutDialog {
         $lblTitleAbt.AutoSize = $true; $lblTitleAbt.ForeColor = $t.Accent
 
         $lblVer = New-Object System.Windows.Forms.Label
-        $lblVer.Text = "Pro Edition v2.43"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
+        $lblVer.Text = "Pro Edition v2.44"; $lblVer.Font = $fBold; $lblVer.Location = [System.Drawing.Point]::new(185, 66)
         $lblVer.AutoSize = $true; $lblVer.ForeColor = $t.Text
 
         $lblDesc = New-Object System.Windows.Forms.Label
@@ -2360,6 +2360,9 @@ $form.Add_FormClosing({
     if ($script:dlTimerFfmpeg){ try{$script:dlTimerFfmpeg.Stop(); $script:dlTimerFfmpeg.Dispose() }catch{} }
     if ($script:dlJobFfmpeg)  { try{Stop-Job $script:dlJobFfmpeg -ErrorAction SilentlyContinue; Remove-Job $script:dlJobFfmpeg -Force -ErrorAction SilentlyContinue}catch{} }
     if ($script:activeJob)   { Stop-Job $script:activeJob -ErrorAction SilentlyContinue; Remove-Job $script:activeJob -Force -ErrorAction SilentlyContinue }
+    if ($script:notifPopTimer)  { try{$script:notifPopTimer.Stop(); $script:notifPopTimer.Dispose() }catch{}; $script:notifPopTimer = $null }
+    if ($script:notifCloseTimer){ try{$script:notifCloseTimer.Stop(); $script:notifCloseTimer.Dispose() }catch{}; $script:notifCloseTimer = $null }
+    if ($script:notifPopup)   { try { if (-not $script:notifPopup.IsDisposed) { $script:notifPopup.Close() } } catch { } }
     Get-Process -Name "yt-dlp", "ffmpeg" -ErrorAction SilentlyContinue | Where-Object { $_.Id -notin $script:knownPIDs } | Stop-Process -Force -ErrorAction SilentlyContinue
 })
 
@@ -2461,6 +2464,20 @@ function Close-NotifPopupAnimated {
 
 function Show-NotifPopup($title, $msg, [bool]$ok = $true, [string]$failUrl = "") {
     try {
+        # A new notification REPLACES the current one. The popup state is
+        # single-instance (one window, one auto-close timer), so showing a new
+        # popup without closing the old one orphaned it: its timer was stopped
+        # and its X button no longer targeted it - popups piled up and stayed
+        # on screen forever after several downloads finished in a row.
+        if ($script:notifPopup) {
+            try {
+                if ($script:notifPopTimer)  { try { $script:notifPopTimer.Stop(); $script:notifPopTimer.Dispose() } catch { }; $script:notifPopTimer = $null }
+                if ($script:notifCloseTimer) { try { $script:notifCloseTimer.Stop(); $script:notifCloseTimer.Dispose() } catch { }; $script:notifCloseTimer = $null }
+                try { if (-not $script:notifPopup.IsDisposed) { $script:notifPopup.Close() } } catch { }
+            } catch { }
+            $script:notifPopup = $null; $script:notifFailUrl = ""; $script:notifXBtn = $null
+            $script:notifXColor = $null; $script:notifXHover = $null
+        }
         $t = Get-ThemePalette $cfg.Theme
         $pop = if ($script:hasNoActivate) { New-Object NoActivateForm } else { New-Object System.Windows.Forms.Form }
         # keep the popup + its timer in SCRIPT scope - a timer that outlives this
@@ -2635,7 +2652,7 @@ $form.Add_Resize({
     }
 })
 
-Write-SessionLog "--- Now Video Down v2.43 started ---"
+Write-SessionLog "--- Now Video Down v2.44 started ---"
 
 # -- SELF-TEST HOOK (only when NVD_SELFTEST=1) -----------------------------
 # Reproduces the minimize→tray→restore cycle in-process and writes the
@@ -2866,6 +2883,23 @@ if ($env:NVD_SELFTEST -eq "1") {
             StLog ("afterFailPopup: title='{0}' links=[{1}] retry={2} log={3} openFolder={4} noAutoTimer={5}" -f $fpTitle, ($fpLinks -join ','), $hasRetry, $hasLog, $hasFolder, (-not $failTimer))
             if ($fp) { try { $fp.Close() } catch { } }
             for ($i = 0; $i -lt 5; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+            # rapid successive notifications: each new popup must REPLACE the
+            # previous one (no stacked popups that lose their X / auto-close)
+            try {
+                Show-NotifPopup "Download complete" "popup replace test one" $true ""
+                $popA = $script:notifPopup
+                for ($i = 0; $i -lt 8; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+                Show-NotifPopup "Download failed" "popup replace test two" $false "https://example.com/replace"
+                for ($i = 0; $i -lt 8; $i++) { [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 50 }
+                $oldGone = ($null -eq $popA -or $popA.IsDisposed -or -not $popA.Visible)
+                $oneVisible = ($null -ne $script:notifPopup -and -not $script:notifPopup.IsDisposed -and $script:notifPopup.Visible)
+                Close-NotifPopupAnimated
+                $rpDeadline = (Get-Date).AddSeconds(10)
+                while ((Get-Date) -lt $rpDeadline -and $script:notifPopup) {
+                    [System.Windows.Forms.Application]::DoEvents(); Start-Sleep -Milliseconds 100
+                }
+                StLog ("popupReplace: oldGone={0} single={1} xClosed={2}" -f $oldGone, $oneVisible, ($null -eq $script:notifPopup))
+            } catch { StLog "popupReplace: error $($_.Exception.Message)" }
             # real failure through the download engine (invalid host) - the whole
             # path: yt-dlp fails -> Notify-Completed(false,..,url) -> failure popup
             try {
